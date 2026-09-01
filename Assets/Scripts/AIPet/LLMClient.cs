@@ -15,8 +15,8 @@ public static class LLMClient
 {
     public const string Endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
-    /// <summary>请求超时（秒）。思考型模型（glm-5.3 系列等）思维链+蓝图生成实测约 120s+，须给足余量。</summary>
-    public const int TimeoutSeconds = 240;
+    /// <summary>请求超时（秒）。思考型模型（glm-5.3 系列等）思维链+蓝图生成实测可达 120s+，须给足余量。</summary>
+    public const int TimeoutSeconds = 300;
 
     public const string SystemPrompt =
         "你是MR粒子构建助手的3D形状规划模块。用户说“构建XXX”，你要把XXX拆解成基础几何体组成的3D模型。\n" +

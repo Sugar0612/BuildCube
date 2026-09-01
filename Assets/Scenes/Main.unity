@@ -5912,7 +5912,7 @@ MonoBehaviour:
   voskModelPath: vosk-model-small-cn-0.22.zip
   useWakeGrammar: 1
   enableTTS: 1
-  glmModel: glm-5.3-flash
+  glmModel: glm-5.3
   glmApiKey: 
   listenTimeout: 12
   builtHoldTime: 45
@@ -5950,8 +5950,14 @@ MonoBehaviour:
   particleMaterialAsset: {fileID: 2100000, guid: ae6ed74fe2130d642b6f64ae47970d88, type: 2}
   idleColor: {r: 1, g: 1, b: 1, a: 1}
   awakeColor: {r: 0.2, g: 1, b: 0.45, a: 1}
-  thinkColor: {r: 1, g: 0.55, b: 0.15, a: 1}
+  galaxyCoreColor: {r: 1, g: 0.88, b: 0.6, a: 1}
+  galaxyArmColor: {r: 0.45, g: 0.58, b: 1, a: 1}
   builtColor: {r: 0.45, g: 0.9, b: 1, a: 1}
+  cosmosSize: 20
+  thinkParticleCount: 6000
+  galaxyRadius: 0.55
+  planetCount: 24
+  planetSizeRange: {x: 0.05, y: 0.22}
   handRadius: 0.08
   handPushPower: 1.6
 --- !u!114 &1905823310

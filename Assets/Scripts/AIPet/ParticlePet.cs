@@ -29,8 +29,9 @@ public class ShapePart
 
 /// <summary>
 /// 粒子宠物：手动驱动 ParticleSystem 粒子，
-/// 在不同状态下呈现不同形态（呼吸球体 / 心跳球体 / 摊开的星云 / 目标形状）。
+/// 在不同状态下呈现不同形态（呼吸球体 / 心跳球体 / 宇宙场景 / 目标形状）。
 /// 粒子位置使用弹簧插值追踪目标点，切换状态时自然过渡。
+/// 思考态为宇宙场景：球体位置变成缓慢旋转的银河漩涡，周围散布随机闪烁的星球。
 /// 粒子池支持动态扩充：复杂蓝图需要的粒子多时自动启用更多粒子（上限 maxParticleCapacity），
 /// 回到待机/下一次构建前重置回基础数量。
 /// </summary>
@@ -58,8 +59,21 @@ public class ParticlePet : MonoBehaviour
     [Header("各状态颜色")]
     public Color idleColor = new Color(1f, 1f, 1f);       // 待机：白色
     public Color awakeColor = new Color(0.2f, 1f, 0.45f); // 唤醒：绿色
-    public Color thinkColor = new Color(1f, 0.55f, 0.15f);// 思考：橙色
+    public Color galaxyCoreColor = new Color(1f, 0.88f, 0.6f);   // 思考-银河核心：暖黄
+    public Color galaxyArmColor = new Color(0.45f, 0.58f, 1f);   // 思考-银河旋臂：蓝紫
     public Color builtColor = new Color(0.45f, 0.9f, 1f); // 构建完成：亮青色
+
+    [Header("思考态宇宙场景")]
+    [Tooltip("宇宙空间边长（米）：星球分布在银河周围的环带内，越靠外越稀")]
+    public float cosmosSize = 8f;
+    [Tooltip("思考态启用的粒子总数（银河 + 星球）")]
+    public int thinkParticleCount = 6000;
+    [Tooltip("银河半径（米）：思考时球体位置变成缓慢旋转的银河漩涡")]
+    public float galaxyRadius = 0.55f;
+    [Tooltip("星球数量（大小/颜色随机，随机闪烁）")]
+    public int planetCount = 24;
+    [Tooltip("星球半径范围（米）：小而密，像银河周围的星团")]
+    public Vector2 planetSizeRange = new Vector2(0.02f, 0.07f);
 
     /// <summary>构建完成时触发一次</summary>
     public event Action OnBuildComplete;
@@ -85,9 +99,12 @@ public class ParticlePet : MonoBehaviour
     bool[] inner;           // 唤醒态的"内部跳动"粒子（内核层）
     float[] delay;          // 构建动画每粒子延迟
     float[] arcAmt;         // 构建飞行弧度
-    float[] thinkAngle;     // 思考态自转角
-    float[] thinkSpin;      // 思考态自转速度
-    float[] thinkY;         // 思考态高度
+    byte[] thinkRole;       // 思考态角色：0=银河 1=星球
+    float[] gxR;            // 银河粒子：半径
+    float[] gxA;            // 银河粒子：初始角（弧度）
+    float[] gxY;            // 银河粒子：离盘面高度
+    int[] plIdx;            // 星球粒子：所属星球索引
+    Vector3[] plOff;        // 星球粒子：单位球面偏移（即伪光照法线）
     float[] sizeJitter;     // 每粒子尺寸随机抖动（打破均匀的卡通感）
     float time;
     float angle;            // 整体缓慢自转角
@@ -95,6 +112,20 @@ public class ParticlePet : MonoBehaviour
     bool buildDoneFired;
     Color[] partColors;     // 蓝图模式下每粒子的部件颜色
     bool directTargets;     // true=shapeBase 已是米制世界目标点（蓝图模式），false=单位形状需乘 shapeScale
+
+    // ---------------- 思考态宇宙场景 ----------------
+    const int GalaxyArms = 3;        // 旋臂数
+    const float GalaxyWinding = 4.6f; // 旋臂缠绕（弧度/米）
+    int galaxyEnd;                    // 银河粒子结束索引（之后是星球）
+    float galaxySpin;                 // 银河整体旋转角（弧度）
+
+    // 星球运行时状态
+    Vector3[] plPos;
+    float[] plRadius;
+    Color[] plColor;
+    float[] plTwNext;   // 距下次闪烁的倒计时（秒）
+    float[] plTwProg;   // 当前闪烁进度（<0 表示空闲）
+    float[] plTwDur;    // 当前闪烁时长
 
     // 手部交互：最多 12 个碰撞点（两手 × 掌心+5指尖），局部空间坐标
     Vector3[] handLocal = new Vector3[12];
@@ -170,9 +201,12 @@ public class ParticlePet : MonoBehaviour
         partColors = new Color[count];
         delay = new float[count];
         arcAmt = new float[count];
-        thinkAngle = new float[count];
-        thinkSpin = new float[count];
-        thinkY = new float[count];
+        thinkRole = new byte[count];
+        gxR = new float[count];
+        gxA = new float[count];
+        gxY = new float[count];
+        plIdx = new int[count];
+        plOff = new Vector3[count];
         sizeJitter = new float[count];
 
         for (int i = 0; i < count; i++)
@@ -190,9 +224,6 @@ public class ParticlePet : MonoBehaviour
             inner[i] = layerR[i] < 0.55f;
             delay[i] = UnityEngine.Random.value * 0.5f;
             arcAmt[i] = 0.5f + UnityEngine.Random.value;
-            thinkAngle[i] = UnityEngine.Random.value * Mathf.PI * 2f;
-            thinkSpin[i] = (UnityEngine.Random.value < 0.5f ? -1f : 1f) * (0.4f + UnityEngine.Random.value * 0.8f);
-            thinkY[i] = (UnityEngine.Random.value * 2f - 1f) * 0.55f;
             sizeJitter[i] = 0.8f + UnityEngine.Random.value * 0.4f; // 0.8~1.2 尺寸抖动
             partColors[i] = Color.white;
         }
@@ -223,6 +254,13 @@ public class ParticlePet : MonoBehaviour
             buildDoneFired = true;
             State = PetState.Built;
             OnBuildComplete?.Invoke();
+        }
+
+        // 思考态宇宙场景推进（银河旋转、星球闪烁）
+        if (State == PetState.Thinking)
+        {
+            if (thinkRole == null) InitCosmosScene();
+            UpdateCosmosScene(dt);
         }
 
         for (int i = 0; i < n; i++)
@@ -271,13 +309,37 @@ public class ParticlePet : MonoBehaviour
                 }
                 case PetState.Thinking:
                 {
-                    // 橙色星云：摊开、自转、明暗流动（"正在构建"的分解感）
-                    float ang = thinkAngle[i] + time * thinkSpin[i];
-                    float rad = shapeScale * (2.1f + 0.8f * Mathf.Sin(time * 0.8f + phase));
-                    float y = thinkY[i] * shapeScale + 0.05f * Mathf.Sin(time * 2.2f + phase);
-                    target = new Vector3(Mathf.Cos(ang) * rad, y, Mathf.Sin(ang) * rad);
-                    color = thinkColor * (0.7f + 0.5f * (0.5f + 0.5f * Mathf.Sin(time * 3f + phase)));
-                    sizeMul = 1.1f;
+                    // 宇宙场景：球体位置变成缓慢旋转的银河漩涡，周围散布随机闪烁的星球
+                    if (thinkRole[i] == 0)
+                    {
+                        // ---- 银河：刚性慢速旋转（约 50 秒一圈），臂上带高亮星点闪烁 ----
+                        float r = gxR[i];
+                        float a = gxA[i] + galaxySpin;
+                        target = new Vector3(Mathf.Cos(a) * r, gxY[i], Mathf.Sin(a) * r);
+                        float tR = Mathf.Clamp01(r / galaxyRadius);
+                        Color c = Color.Lerp(galaxyCoreColor, galaxyArmColor, Mathf.Clamp01(tR * 1.15f));
+                        // 核心更亮；旋臂上 7% 的"亮星"高频闪烁，像恒星风
+                        if (phases[i] > 0.93f)
+                        {
+                            float spark = 0.5f + 0.5f * Mathf.Sin(time * 7f + phase * 5f);
+                            c = Color.Lerp(c, Color.white, 0.35f + 0.5f * spark) * (1.1f + 0.9f * spark);
+                            sizeMul = 1.3f;
+                        }
+                        else sizeMul = 0.9f;
+                        color = c * ((1.15f - 0.55f * tR) * (0.75f + 0.25f * flicker));
+                    }
+                    else
+                    {
+                        // ---- 星球：伪光照立体球，随机时刻整体闪亮（冲向白色）----
+                        int p = plIdx[i];
+                        Vector3 nrm = plOff[i];
+                        target = plPos[p] + nrm * plRadius[p];
+                        float tw = plTwProg[p] >= 0f
+                            ? Mathf.Sin(Mathf.Clamp01(plTwProg[p]) * Mathf.PI) : 0f; // 闪烁包络
+                        color = plColor[p] * Shade(nrm) * (0.8f + 0.2f * flicker) * (1f + 1.1f * tw);
+                        color = Color.Lerp(color, Color.white, 0.45f * tw); // 闪烁时泛白
+                        sizeMul = 1f;
+                    }
                     break;
                 }
                 case PetState.Building:
@@ -290,7 +352,7 @@ public class ParticlePet : MonoBehaviour
                     // 目标形状的近似法线（以形状中心为原点），构建过程中逐渐显出立体明暗
                     Vector3 nrm = directTargets ? SafeNormalize(shapeBase[i]) : sphereBase[i];
                     Color endCol = directTargets ? partColors[i] : builtColor;
-                    color = Color.Lerp(thinkColor, endCol, e) * (0.85f + 0.3f * flicker)
+                    color = Color.Lerp(galaxyArmColor, endCol, e) * (0.85f + 0.3f * flicker)
                                          * Mathf.Lerp(1f, Shade(nrm), e);
                     sizeMul = 1f + 0.5f * (1f - e);
                     positions[i] = target;
@@ -362,6 +424,7 @@ public class ParticlePet : MonoBehaviour
         if (State == newState) return;
         if (newState == PetState.Building) return; // 必须通过 BuildBlueprint() 进入
         State = newState;
+        if (newState == PetState.Thinking) InitCosmosScene(); // 进入思考态：布置宇宙场景
         // 回到待机：粒子池重置回基础数量（下一次构建按蓝图重新计算）
         if (newState == PetState.Idle && ActiveCount != particleCount)
             ActiveCount = Mathf.Clamp(particleCount, 1, particles.Length);
@@ -464,6 +527,155 @@ public class ParticlePet : MonoBehaviour
                 return 4f * Mathf.PI * s.x * s.x;
         }
     }
+
+    // ---------------- 思考态宇宙场景 ----------------
+
+    /// <summary>进入思考态：把粒子分配成 银河/星球 两种角色并初始化场景</summary>
+    void InitCosmosScene()
+    {
+        int cap = particles.Length;
+        int planets = Mathf.Clamp(planetCount, 1, 48);
+        int minTotal = 800 + planets * 80;
+        int total = Mathf.Clamp(Mathf.Max(thinkParticleCount, minTotal), minTotal, cap);
+
+        // 新启用的粒子从球面基准位置进入，视觉上像从群体中长出来
+        for (int i = ActiveCount; i < total; i++)
+            positions[i] = sphereBase[i] * (shapeScale * layerR[i]);
+        ActiveCount = total;
+
+        // ---- 银河粒子：约 40%（其余给星球，保证小球足够致密）----
+        int galaxyN = Mathf.Clamp(Mathf.RoundToInt(total * 0.40f), 400, total - planets * 80);
+        galaxyEnd = galaxyN;
+
+        for (int i = 0; i < galaxyN; i++)
+        {
+            thinkRole[i] = 0;
+            if (i % 5 == 0)
+            {
+                // 中央核球：内密外疏的小球状晕
+                Vector3 v = UnityEngine.Random.onUnitSphere *
+                           Mathf.Pow(UnityEngine.Random.value, 2f) * galaxyRadius * 0.25f;
+                gxR[i] = new Vector2(v.x, v.z).magnitude;
+                gxA[i] = UnityEngine.Random.value * Mathf.PI * 2f;
+                gxY[i] = v.y * 1.6f;
+            }
+            else
+            {
+                // 旋臂：螺旋缠绕 + 越向外越松散的散布；盘面很薄
+                float r = 0.06f + Mathf.Pow(UnityEngine.Random.value, 0.75f) * (galaxyRadius - 0.06f);
+                int arm = i % GalaxyArms;
+                gxA[i] = arm * (Mathf.PI * 2f / GalaxyArms)
+                       + r * GalaxyWinding
+                       + Gauss() * (0.10f + r * 0.30f);
+                gxR[i] = Mathf.Max(0f, r + Gauss() * 0.02f);
+                gxY[i] = Gauss() * (0.015f + r * 0.03f);
+            }
+        }
+
+        // ---- 星球：随机大小/颜色/高度，避开中心银河区且互不重叠 ----
+        plPos = new Vector3[planets];
+        plRadius = new float[planets];
+        plColor = new Color[planets];
+        plTwNext = new float[planets];
+        plTwProg = new float[planets];
+        plTwDur = new float[planets];
+
+        float half = cosmosSize * 0.5f;
+        float minCore = galaxyRadius + 0.3f; // 星球不遮挡银河，但紧贴其外
+        for (int p = 0; p < planets; p++)
+        {
+            plRadius[p] = UnityEngine.Random.Range(planetSizeRange.x, planetSizeRange.y);
+            plColor[p] = Color.HSVToRGB(UnityEngine.Random.value,
+                                        UnityEngine.Random.Range(0.5f, 0.95f),
+                                        UnityEngine.Random.Range(0.7f, 1f));
+            plTwNext[p] = UnityEngine.Random.Range(1f, 6f);
+            plTwProg[p] = -1f;
+
+            // 拒绝采样：环带分布（紧贴银河、外圈稀疏）且互不重叠
+            Vector3 pos = Vector3.zero;
+            for (int tries = 0; tries < 24; tries++)
+            {
+                // 随机方向 × 内偏半径（幂次越高越向内聚），高度压扁贴近银盘
+                Vector2 dir = UnityEngine.Random.insideUnitCircle.normalized;
+                float rr = minCore + Mathf.Pow(UnityEngine.Random.value, 1.8f) * (half - minCore);
+                pos = new Vector3(dir.x * rr,
+                                  UnityEngine.Random.Range(-0.5f, 0.9f) * (0.3f + rr * 0.25f),
+                                  dir.y * rr);
+                bool ok = true;
+                for (int q = 0; q < p; q++)
+                    if ((pos - plPos[q]).sqrMagnitude <
+                        Mathf.Pow(plRadius[p] + plRadius[q] + 0.18f, 2f)) { ok = false; break; }
+                if (ok) break;
+            }
+            plPos[p] = pos;
+        }
+
+        // ---- 星球粒子：按半径平方（表面积）占比分配，每颗保底 80 个（小而密）----
+        int remain = total - galaxyN;
+        var w = new float[planets];
+        float wSum = 0f;
+        for (int p = 0; p < planets; p++) { w[p] = plRadius[p] * plRadius[p]; wSum += w[p]; }
+        var cnt = new int[planets];
+        int used = 0;
+        for (int p = 0; p < planets; p++)
+        {
+            cnt[p] = Mathf.Max(80, Mathf.RoundToInt(remain * w[p] / wSum));
+            used += cnt[p];
+        }
+        int diff = remain - used;
+        for (int fix = 0; diff != 0 && fix < planets * 4; fix++) // 修正取整误差，保持总数一致
+        {
+            int p = fix % planets;
+            if (diff > 0) { cnt[p]++; diff--; }
+            else if (cnt[p] > 80) { cnt[p]--; diff++; }
+        }
+
+        int idx = galaxyEnd;
+        for (int p = 0; p < planets; p++)
+        {
+            for (int k = 0; k < cnt[p] && idx < total; k++, idx++)
+            {
+                thinkRole[idx] = 1;
+                plIdx[idx] = p;
+                plOff[idx] = FibonacciSphere(k, cnt[p]); // 单位球面 → 既是表面偏移也是光照法线
+            }
+        }
+        // 兜底：个别未分配到的粒子并入银河核心（gxR 默认 0 → 位于核心，视觉无害）
+        for (int i = idx; i < total; i++) thinkRole[i] = 0;
+    }
+
+    /// <summary>思考态场景推进：银河慢速旋转 + 星球随机闪烁</summary>
+    void UpdateCosmosScene(float dt)
+    {
+        galaxySpin += dt * 0.125f; // 约 50 秒一圈的缓慢旋转
+
+        if (plTwNext == null) return;
+        for (int p = 0; p < plTwNext.Length; p++)
+        {
+            if (plTwProg[p] < 0f)
+            {
+                plTwNext[p] -= dt; // 空闲倒计时
+                if (plTwNext[p] <= 0f)
+                {
+                    plTwProg[p] = 0f;
+                    plTwDur[p] = UnityEngine.Random.Range(0.5f, 1.4f);
+                }
+            }
+            else
+            {
+                plTwProg[p] += dt / plTwDur[p]; // 闪烁进度 0→1
+                if (plTwProg[p] >= 1f)
+                {
+                    plTwProg[p] = -1f;
+                    plTwNext[p] = UnityEngine.Random.Range(1.5f, 7f);
+                }
+            }
+        }
+    }
+
+    /// <summary>近似高斯随机数（三次均匀采样之和，范围约 ±1.5）</summary>
+    static float Gauss() =>
+        UnityEngine.Random.value + UnityEngine.Random.value + UnityEngine.Random.value - 1.5f;
 
     // ---------------- 蓝图部件采样 ----------------
 

@@ -39,6 +39,7 @@ public class AIVoicePet : MonoBehaviour
 
     PetStatusUI ui;
     VoskSpeechToText vosk;
+    VoiceProcessor voice;
     AndroidTTS tts;
     float wakeDeadline;
     float builtAt = -999f;
@@ -54,12 +55,12 @@ public class AIVoicePet : MonoBehaviour
     static readonly string[] IdleGrammar =
     {
         "你好", "您好",
-        "构建立方体", "构建方块", "构建正方体",
-        "构建球体", "构建圆球", "构建球",
-        "构建圆柱", "构建圆柱体",
-        "构建圆锥", "构建圆锥体",
-        "构建圆环", "构建圆环体",
-        "构建金字塔", "构建角锥",
+        // "构建立方体", "构建方块", "构建正方体",
+        // "构建球体", "构建圆球", "构建球",
+        // "构建圆柱", "构建圆柱体",
+        // "构建圆锥", "构建圆锥体",
+        // "构建圆环", "构建圆环体",
+        // "构建金字塔", "构建角锥",
     };
 
     void Awake()
@@ -69,7 +70,7 @@ public class AIVoicePet : MonoBehaviour
         if (enableTTS) tts = gameObject.AddComponent<AndroidTTS>();
 
         // 运行时装配语音链路（Vosk 插件组件）
-        var voice = gameObject.AddComponent<VoiceProcessor>();
+        voice = gameObject.AddComponent<VoiceProcessor>();
         vosk = gameObject.AddComponent<VoskSpeechToText>();
         vosk.ModelPath = voskModelPath;
         vosk.VoiceProcessor = voice;
@@ -107,6 +108,23 @@ public class AIVoicePet : MonoBehaviour
             Pet.SetState(PetState.Idle);
             SetGrammarMode(true);
             SetIdleUI();
+        }
+    }
+
+    // ---------------- 麦克风开关 ----------------
+
+    /// <summary>开/关麦克风采集。思考阶段无语音交互意义，关麦省电并避免误识别。</summary>
+    void SetMic(bool on)
+    {
+        if (voice == null) return;
+        try
+        {
+            if (on && !voice.IsRecording) voice.StartRecording();
+            else if (!on && voice.IsRecording) voice.StopRecording();
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[AIPet] 麦克风切换失败: {e.Message}");
         }
     }
 
@@ -217,6 +235,7 @@ public class AIVoicePet : MonoBehaviour
     {
         aiBusy = true;
         Pet.SetState(PetState.Thinking);
+        SetMic(false); // 思考阶段不收语音：关麦省电，结束后恢复
         if (ui != null)
         {
             ui.SetStatus("AI 思考中…");
@@ -238,6 +257,7 @@ public class AIVoicePet : MonoBehaviour
             Pet.SetState(PetState.Awake);
             wakeDeadline = Time.time + listenTimeout;
             aiBusy = false;
+            SetMic(true);
             return;
         }
 
@@ -273,6 +293,7 @@ public class AIVoicePet : MonoBehaviour
                     Pet.SetState(PetState.Awake);
                     wakeDeadline = Time.time + listenTimeout;
                     aiBusy = false;
+                    SetMic(true);
                     return;
                 }
 
@@ -303,11 +324,13 @@ public class AIVoicePet : MonoBehaviour
         }
 
         aiBusy = false;
+        SetMic(true); // 思考结束（进入构建/唤醒），恢复语音监听
     }
 
     void OnBuildComplete()
     {
         builtAt = Time.time;
+        SetMic(true); // 构建完成：确保麦克风恢复（展示阶段可语音打断）
         tts?.Speak("构建完成");
         if (ui != null)
         {
