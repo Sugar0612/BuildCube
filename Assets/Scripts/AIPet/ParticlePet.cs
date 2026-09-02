@@ -65,15 +65,19 @@ public class ParticlePet : MonoBehaviour
 
     [Header("思考态宇宙场景")]
     [Tooltip("宇宙空间边长（米）：星球分布在银河周围的环带内，越靠外越稀")]
-    public float cosmosSize = 8f;
-    [Tooltip("思考态启用的粒子总数（银河 + 星球）")]
-    public int thinkParticleCount = 6000;
+    public float cosmosSize = 6f;
+    [Tooltip("思考态启用的粒子总数（银河 + 星球 + 星辰 + 黑色空间雾）")]
+    public int thinkParticleCount = 7600;
     [Tooltip("银河半径（米）：思考时球体位置变成缓慢旋转的银河漩涡")]
     public float galaxyRadius = 0.55f;
     [Tooltip("星球数量（大小/颜色随机，随机闪烁）")]
-    public int planetCount = 24;
+    public int planetCount = 26;
     [Tooltip("星球半径范围（米）：小而密，像银河周围的星团")]
     public Vector2 planetSizeRange = new Vector2(0.02f, 0.07f);
+    [Tooltip("远处闪烁星辰数量（分布在宇宙外围球壳上）")]
+    public int starCount = 350;
+    [Tooltip("黑色空间雾粒子数（大量微小暗粒子铺满全空间，模拟宇宙的黑暗背景）")]
+    public int nebulaCount = 2400;
 
     /// <summary>构建完成时触发一次</summary>
     public event Action OnBuildComplete;
@@ -99,12 +103,14 @@ public class ParticlePet : MonoBehaviour
     bool[] inner;           // 唤醒态的"内部跳动"粒子（内核层）
     float[] delay;          // 构建动画每粒子延迟
     float[] arcAmt;         // 构建飞行弧度
-    byte[] thinkRole;       // 思考态角色：0=银河 1=星球
+    byte[] thinkRole;       // 思考态角色：0=银河 1=星球 2=远处星辰 3=宇宙暗幕
     float[] gxR;            // 银河粒子：半径
     float[] gxA;            // 银河粒子：初始角（弧度）
     float[] gxY;            // 银河粒子：离盘面高度
     int[] plIdx;            // 星球粒子：所属星球索引
-    Vector3[] plOff;        // 星球粒子：单位球面偏移（即伪光照法线）
+    Vector3[] plOff;        // 星球粒子：球面偏移（表面层=单位向量，内壳层=0.72 倍；亦为伪光照法线来源）
+    Vector3[] stDir;        // 星辰/暗幕粒子：单位方向
+    float[] stR;            // 星辰/暗幕粒子：距离（米）
     float[] sizeJitter;     // 每粒子尺寸随机抖动（打破均匀的卡通感）
     float time;
     float angle;            // 整体缓慢自转角
@@ -127,8 +133,8 @@ public class ParticlePet : MonoBehaviour
     float[] plTwProg;   // 当前闪烁进度（<0 表示空闲）
     float[] plTwDur;    // 当前闪烁时长
 
-    // 手部交互：最多 12 个碰撞点（两手 × 掌心+5指尖），局部空间坐标
-    Vector3[] handLocal = new Vector3[12];
+    // 交互碰撞点：双手关节 12 + 双手柄 4 + 头盔 1（局部空间坐标）
+    Vector3[] handLocal = new Vector3[18];
     int handCount;
 
     // 伪光照：固定主光方向（左上前），用于朗伯着色——粒子按朝向明暗分层，产生立体感
@@ -179,6 +185,7 @@ public class ParticlePet : MonoBehaviour
 
         var rend = GetComponent<ParticleSystemRenderer>();
         rend.renderMode = ParticleSystemRenderMode.Billboard;
+        rend.sortMode = ParticleSystemSortMode.Distance; // 透明混合需远→近绘制（远处暗幕先画，近处银河后画）
         // 优先使用材质资产（构建后仍有效）；运行时创建仅作编辑器兜底
         rend.sharedMaterial = particleMaterialAsset != null ? particleMaterialAsset : CreateParticleMaterial();
         if (particleMaterialAsset == null)
@@ -207,6 +214,8 @@ public class ParticlePet : MonoBehaviour
         gxY = new float[count];
         plIdx = new int[count];
         plOff = new Vector3[count];
+        stDir = new Vector3[count];
+        stR = new float[count];
         sizeJitter = new float[count];
 
         for (int i = 0; i < count; i++)
@@ -309,7 +318,7 @@ public class ParticlePet : MonoBehaviour
                 }
                 case PetState.Thinking:
                 {
-                    // 宇宙场景：球体位置变成缓慢旋转的银河漩涡，周围散布随机闪烁的星球
+                    // 宇宙场景：银河漩涡 + 星团 + 远处星辰 + 暗幕背景
                     if (thinkRole[i] == 0)
                     {
                         // ---- 银河：刚性慢速旋转（约 50 秒一圈），臂上带高亮星点闪烁 ----
@@ -328,17 +337,37 @@ public class ParticlePet : MonoBehaviour
                         else sizeMul = 0.9f;
                         color = c * ((1.15f - 0.55f * tR) * (0.75f + 0.25f * flicker));
                     }
-                    else
+                    else if (thinkRole[i] == 1)
                     {
-                        // ---- 星球：伪光照立体球，随机时刻整体闪亮（冲向白色）----
+                        // ---- 星球：双壳层（表面+内壳）伪光照立体球，随机时刻整体闪亮 ----
                         int p = plIdx[i];
-                        Vector3 nrm = plOff[i];
-                        target = plPos[p] + nrm * plRadius[p];
+                        Vector3 nrm = SafeNormalize(plOff[i]); // 内壳层偏移非单位长度
+                        target = plPos[p] + plOff[i] * plRadius[p];
                         float tw = plTwProg[p] >= 0f
                             ? Mathf.Sin(Mathf.Clamp01(plTwProg[p]) * Mathf.PI) : 0f; // 闪烁包络
                         color = plColor[p] * Shade(nrm) * (0.8f + 0.2f * flicker) * (1f + 1.1f * tw);
                         color = Color.Lerp(color, Color.white, 0.45f * tw); // 闪烁时泛白
-                        sizeMul = 1f;
+                        sizeMul = 1.15f; // 略放大让相邻粒子搭接，球面无缺口
+                    }
+                    else if (thinkRole[i] == 2)
+                    {
+                        // ---- 远处星辰：冷暖色温各异的小亮点，高频闪烁 ----
+                        target = stDir[i] * stR[i];
+                        float tw = Mathf.Pow(0.5f + 0.5f * Mathf.Sin(
+                            time * (1.2f + 2.5f * phases[i]) + phase * 6.2832f), 2f);
+                        Color tint = Color.Lerp(new Color(0.75f, 0.85f, 1f),   // 冷蓝白
+                                                 new Color(1f, 0.9f, 0.72f),    // 暖橙白
+                                                 phases[i]);
+                        color = tint * (0.45f + 1.55f * tw);
+                        sizeMul = 0.65f + 0.55f * tw;
+                    }
+                    else
+                    {
+                        // ---- 黑色空间雾：铺满全空间的小暗粒子，大量叠加成连续黑暗 ----
+                        target = stDir[i] * stR[i];
+                        float a = 0.34f + 0.10f * Mathf.Sin(time * 0.12f + phase * 6.2832f); // 极慢涌动
+                        color = new Color(0.012f, 0.015f, 0.035f, a);
+                        sizeMul = 9f + 7f * phases[i]; // 0.23~0.42m 的柔和小暗斑，重叠成雾
                     }
                     break;
                 }
@@ -530,12 +559,14 @@ public class ParticlePet : MonoBehaviour
 
     // ---------------- 思考态宇宙场景 ----------------
 
-    /// <summary>进入思考态：把粒子分配成 银河/星球 两种角色并初始化场景</summary>
+    /// <summary>进入思考态：把粒子分配成 银河/星球/星辰/暗幕 四种角色并初始化场景</summary>
     void InitCosmosScene()
     {
         int cap = particles.Length;
         int planets = Mathf.Clamp(planetCount, 1, 48);
-        int minTotal = 800 + planets * 80;
+        int stars = Mathf.Clamp(starCount, 0, 1200);
+        int nebulae = Mathf.Clamp(nebulaCount, 0, 4000);
+        int minTotal = 800 + planets * 80 + stars + nebulae;
         int total = Mathf.Clamp(Mathf.Max(thinkParticleCount, minTotal), minTotal, cap);
 
         // 新启用的粒子从球面基准位置进入，视觉上像从群体中长出来
@@ -543,8 +574,11 @@ public class ParticlePet : MonoBehaviour
             positions[i] = sphereBase[i] * (shapeScale * layerR[i]);
         ActiveCount = total;
 
-        // ---- 银河粒子：约 40%（其余给星球，保证小球足够致密）----
-        int galaxyN = Mathf.Clamp(Mathf.RoundToInt(total * 0.40f), 400, total - planets * 80);
+        // ---- 预算分配：暗幕 + 星辰 + 银河（约 35%）+ 星球（其余）----
+        int nebulaN = Mathf.Min(nebulae, Mathf.Max(0, total - 1200));
+        int starN = Mathf.Min(stars, Mathf.Max(0, total - nebulaN - 1000));
+        int galaxyN = Mathf.Clamp(Mathf.RoundToInt((total - nebulaN - starN) * 0.35f), 300,
+                                  total - nebulaN - starN - planets * 60);
         galaxyEnd = galaxyN;
 
         for (int i = 0; i < galaxyN; i++)
@@ -581,7 +615,7 @@ public class ParticlePet : MonoBehaviour
         plTwDur = new float[planets];
 
         float half = cosmosSize * 0.5f;
-        float minCore = galaxyRadius + 0.3f; // 星球不遮挡银河，但紧贴其外
+        float minCore = galaxyRadius + 0.15f; // 星球紧贴银河外缘，形成致密星团
         for (int p = 0; p < planets; p++)
         {
             plRadius[p] = UnityEngine.Random.Range(planetSizeRange.x, planetSizeRange.y);
@@ -597,21 +631,21 @@ public class ParticlePet : MonoBehaviour
             {
                 // 随机方向 × 内偏半径（幂次越高越向内聚），高度压扁贴近银盘
                 Vector2 dir = UnityEngine.Random.insideUnitCircle.normalized;
-                float rr = minCore + Mathf.Pow(UnityEngine.Random.value, 1.8f) * (half - minCore);
+                float rr = minCore + Mathf.Pow(UnityEngine.Random.value, 2.2f) * (half - minCore);
                 pos = new Vector3(dir.x * rr,
                                   UnityEngine.Random.Range(-0.5f, 0.9f) * (0.3f + rr * 0.25f),
                                   dir.y * rr);
                 bool ok = true;
                 for (int q = 0; q < p; q++)
                     if ((pos - plPos[q]).sqrMagnitude <
-                        Mathf.Pow(plRadius[p] + plRadius[q] + 0.18f, 2f)) { ok = false; break; }
+                        Mathf.Pow(plRadius[p] + plRadius[q] + 0.06f, 2f)) { ok = false; break; }
                 if (ok) break;
             }
             plPos[p] = pos;
         }
 
-        // ---- 星球粒子：按半径平方（表面积）占比分配，每颗保底 80 个（小而密）----
-        int remain = total - galaxyN;
+        // ---- 星球粒子：按半径平方（表面积）占比分配，每颗保底 80 个；双壳层填充 ----
+        int remain = total - galaxyN - starN - nebulaN;
         var w = new float[planets];
         float wSum = 0f;
         for (int p = 0; p < planets; p++) { w[p] = plRadius[p] * plRadius[p]; wSum += w[p]; }
@@ -633,13 +667,36 @@ public class ParticlePet : MonoBehaviour
         int idx = galaxyEnd;
         for (int p = 0; p < planets; p++)
         {
+            // 双壳层：表面 70% 定形 + 内壳 30%（0.72r）填补表面缝隙 → 球体饱满无缺口
+            int surf = Mathf.CeilToInt(cnt[p] * 0.7f);
             for (int k = 0; k < cnt[p] && idx < total; k++, idx++)
             {
                 thinkRole[idx] = 1;
                 plIdx[idx] = p;
-                plOff[idx] = FibonacciSphere(k, cnt[p]); // 单位球面 → 既是表面偏移也是光照法线
+                plOff[idx] = k < surf
+                    ? FibonacciSphere(k, surf)
+                    : FibonacciSphere(k - surf, cnt[p] - surf) * 0.72f;
             }
         }
+
+        // ---- 远处星辰：外围球壳（6~11m），地平线以下翻转到天上提高利用率 ----
+        for (int k = 0; k < starN; k++, idx++)
+        {
+            thinkRole[idx] = 2;
+            Vector3 d = UnityEngine.Random.onUnitSphere;
+            if (d.y < -0.3f) d.y = -d.y;
+            stDir[idx] = d;
+            stR[idx] = UnityEngine.Random.Range(6f, 11f);
+        }
+
+        // ---- 黑色空间雾：大量微小暗粒子均匀铺满整个空间（1.2~11m），叠加成连续的黑暗 ----
+        for (int k = 0; k < nebulaN; k++, idx++)
+        {
+            thinkRole[idx] = 3;
+            stDir[idx] = UnityEngine.Random.onUnitSphere;
+            stR[idx] = 1.2f + Mathf.Pow(UnityEngine.Random.value, 1f / 3f) * 9.8f; // 体积均匀
+        }
+
         // 兜底：个别未分配到的粒子并入银河核心（gxR 默认 0 → 位于核心，视觉无害）
         for (int i = idx; i < total; i++) thinkRole[i] = 0;
     }

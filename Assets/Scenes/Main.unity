@@ -5958,6 +5958,8 @@ MonoBehaviour:
   galaxyRadius: 0.55
   planetCount: 24
   planetSizeRange: {x: 0.05, y: 0.22}
+  starCount: 500
+  nebulaCount: 380
   handRadius: 0.08
   handPushPower: 1.6
 --- !u!114 &1905823310

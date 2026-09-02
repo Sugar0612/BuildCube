@@ -28,7 +28,8 @@ public class HandParticleInteractor : MonoBehaviour
 
     HandJointLocations leftLocs = new HandJointLocations();
     HandJointLocations rightLocs = new HandJointLocations();
-    readonly Vector3[] worldPoints = new Vector3[TrackedJoints.Length * 2];
+    // 12（双手）+ 4（双手柄各 2 点）+ 1（头盔）= 17
+    readonly Vector3[] worldPoints = new Vector3[18];
 
     void Start()
     {
@@ -65,6 +66,9 @@ public class HandParticleInteractor : MonoBehaviour
 
         n += CollectHand(HandType.HandLeft, leftLocs, n);
         n += CollectHand(HandType.HandRight, rightLocs, n);
+        n += CollectController(PXR_Input.Controller.LeftController, n);
+        n += CollectController(PXR_Input.Controller.RightController, n);
+        n += CollectHead(n);
         pet?.SetHandPoints(worldPoints, n);
     }
 
@@ -84,5 +88,27 @@ public class HandParticleInteractor : MonoBehaviour
                 : p;
         }
         return count;
+    }
+
+    /// <summary>收集一只手柄的 2 个碰撞点（手柄位置 + 指向方向前 8cm），未连接返回 0</summary>
+    int CollectController(PXR_Input.Controller controller, int offset)
+    {
+        if (!PXR_Input.IsControllerConnected(controller)) return 0;
+
+        Vector3 p = PXR_Input.GetControllerPredictPosition(controller, 0);
+        Quaternion r = PXR_Input.GetControllerPredictRotation(controller, 0);
+        worldPoints[offset] = xrOrigin != null ? xrOrigin.TransformPoint(p) : p;
+        Vector3 tip = p + r * Vector3.forward * 0.08f;
+        worldPoints[offset + 1] = xrOrigin != null ? xrOrigin.TransformPoint(tip) : tip;
+        return 2;
+    }
+
+    /// <summary>头盔碰撞点：主相机位置（凑近粒子时像用头推开它们）</summary>
+    int CollectHead(int offset)
+    {
+        var cam = Camera.main;
+        if (cam == null) return 0;
+        worldPoints[offset] = cam.transform.position;
+        return 1;
     }
 }

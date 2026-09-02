@@ -263,18 +263,29 @@ public class AIVoicePet : MonoBehaviour
 
         {
             string reply = null;
-            for (int attempt = 0; attempt < 2 && string.IsNullOrEmpty(reply); attempt++)
+            try
             {
-                try
+                // 单次调用：超时/失败不自动重连（重试只会再等一轮超时），直接回监听。
+                // 流式进度：每 0.5s 上报思维链长度/最近内容，UI 上画伪进度条
+                reply = await LLMClient.AskAsync(glmApiKey, raw, glmModel, p =>
                 {
-                    reply = await LLMClient.AskAsync(glmApiKey, raw, glmModel);
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[AIPet] GLM 调用异常: {e.Message}");
-                }
-                if (string.IsNullOrEmpty(reply) && attempt == 0 && ui != null)
-                    ui.SetHint("GLM 连接失败，重试中…");
+                    if (ui == null) return;
+                    float pct = p.answerChars > 0
+                        ? Mathf.Min(99f, 90f + 9f * Mathf.Clamp01(p.answerChars / 900f))
+                        : Mathf.Min(90f, 100f * p.reasoningChars / 2400f);
+                    int bars = Mathf.RoundToInt(pct / 10f);
+                    var sb = new StringBuilder(96);
+                    sb.Append("思考 ").Append(p.elapsed.ToString("0")).Append("s [")
+                      .Append('#', bars).Append('-', 10 - bars).Append("] ")
+                      .Append(pct.ToString("0")).Append('%');
+                    if (!string.IsNullOrEmpty(p.tail))
+                        sb.Append('\n').Append(p.tail);
+                    ui.SetHint(sb.ToString());
+                });
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[AIPet] GLM 调用异常: {e.Message}");
             }
 
             if (!string.IsNullOrEmpty(reply))

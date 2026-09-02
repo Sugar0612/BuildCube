@@ -15,26 +15,21 @@ public static class LLMClient
 {
     public const string Endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
-    /// <summary>请求超时（秒）。思考型模型（glm-5.3 系列等）思维链+蓝图生成实测可达 120s+，须给足余量。</summary>
+    /// <summary>空闲看门狗（秒）：流式模式下连续这么久没有收到任何新字节才判定失败。
+    /// 思维链生成期间 token 持续推送，正常永远不会触发；只有网络真断了才会超时。</summary>
     public const int TimeoutSeconds = 300;
 
     public const string SystemPrompt =
-        "你是MR粒子构建助手的3D形状规划模块。用户说“构建XXX”，你要把XXX拆解成基础几何体组成的3D模型。\n" +
+        "你是MR粒子构建助手的3D形状规划模块。把用户说的物体拆解成基础几何体组成的3D模型。\n" +
         "只输出json对象：{\"parts\":[...]}，禁止任何解释、前后缀、代码块标记。parts 数组元素格式：\n" +
         "{\"shape\":\"sphere|cube|cylinder|cone|torus|pyramid\",\"pos\":[x,y,z],\"rot\":[x,y,z],\"scale\":[x,y,z],\"color\":[r,g,b]}\n" +
-        "重要——如果用户说的物体你不知道是什么、或是虚构/不存在的名词，直接输出 {\"parts\":[]}，不要编造。\n" +
-        "坐标与尺寸规则：\n" +
-        "- 坐标系：Y轴向上。原点在模型几何中心。整体必须容纳在X∈[-0.35,0.35]、Y∈[-0.35,0.35]、Z∈[-0.35,0.35]的立方体内。\n" +
-        "- scale 含义：sphere=半径（只看x，y z忽略）；cube=半边长（x y z可不同做长方体）；cylinder=沿自身Y轴的柱体，[半径,半高,半径]；cone=尖朝自身+Y，[底半径,半高,底半径]；torus=默认平躺在XZ面（环轴为Y），[大半径,管半径,忽略]；pyramid=尖朝自身+Y，[半底边,半高,半底边]。\n" +
-        "- rot 是欧拉角（度），用于把部件从默认朝向转到需要的朝向。\n" +
-        "- color 为0~1浮点RGB，配色贴近真实物体。\n" +
-        "结构规则（重要）：\n" +
-        "1. 先想清楚目标物体的真实结构，再规划部件：主体轮廓用什么大部件，特征细节用什么小部件。先用文字想清楚整体比例（高:宽:深），再按比例落坐标。\n" +
-        "2. 高塔/建筑类：底部宽、顶部窄，由下至上逐层缩小。\n" +
-        "3. 环形装置类：主体用torus，附加装置围绕主环均匀分布。\n" +
-        "4. 长条/管道类：用细长cylinder或cube旋转到目标方向。\n" +
-        "5. 部件数量：简单物体4~8个，复杂结构可用8~24个。对称结构必须给足对称部件（左右各一、或环形均匀分布6~12个）。\n" +
-        "6. 部件之间要相连成整体，不要悬浮。\n";
+        "如果用户说的物体你不知道是什么、或是虚构/不存在的名词，直接输出 {\"parts\":[]}，不要编造。\n" +
+        "规则：\n" +
+        "- Y轴向上，原点在模型几何中心，整体容纳在±0.35的立方体内。\n" +
+        "- scale含义：sphere=半径；cube=半边长；cylinder=沿自身Y轴[半径,半高,半径]；cone=尖朝自身+Y[底半径,半高,半径]；torus=环轴为Y[大半径,管半径,忽略]；pyramid=尖朝自身+Y[半底边,半高,半底边]。\n" +
+        "- rot是欧拉角（度）。color是0~1浮点RGB。\n" +
+        "- 部件数：简单物体3~6个，复杂物体最多10个。用大部件搭主体轮廓，少量小部件做特征，不要逐细节堆部件。\n" +
+        "- 部件之间相连成整体，不要悬浮。所有数字只保留2位小数。\n";
         // "示例1——托卡马克装置（真空室+环形分布的磁场线圈+顶部底部供电柱）：\n" +
         // "[{\"shape\":\"torus\",\"pos\":[0,0,0],\"rot\":[0,0,0],\"scale\":[0.16,0.045,0.045],\"color\":[0.9,0.3,0.1]},{\"shape\":\"torus\",\"pos\":[0,0,0],\"rot\":[0,0,0],\"scale\":[0.22,0.012,0.012],\"color\":[0.35,0.4,0.5]},{\"shape\":\"cylinder\",\"pos\":[0,0.3,0],\"rot\":[0,0,0],\"scale\":[0.04,0.06,0.04],\"color\":[0.4,0.5,0.6]},{\"shape\":\"cylinder\",\"pos\":[0,-0.3,0],\"rot\":[0,0,0],\"scale\":[0.04,0.06,0.04],\"color\":[0.4,0.5,0.6]},{\"shape\":\"cylinder\",\"pos\":[0.16,0,0],\"rot\":[0,180,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[-0.16,0,0],\"rot\":[0,0,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[0,0,0.16],\"rot\":[0,90,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[0,0,-0.16],\"rot\":[0,-90,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[0.11,0,0.11],\"rot\":[0,135,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[-0.11,0,0.11],\"rot\":[0,45,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[0.11,0,-0.11],\"rot\":[0,-135,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]},{\"shape\":\"cylinder\",\"pos\":[-0.11,0,-0.11],\"rot\":[0,-45,90],\"scale\":[0.014,0.05,0.014],\"color\":[0.5,0.55,0.6]}]\n" +
         // "示例2——埃菲尔铁塔（4条斜柱+两层平台+塔尖天线）：\n" +
@@ -42,16 +37,28 @@ public static class LLMClient
         // "示例3——直线中子加速器（长真空管道+聚焦磁铁环+靶室）：\n" +
         // "[{\"shape\":\"cylinder\",\"pos\":[0,0,0],\"rot\":[0,0,90],\"scale\":[0.04,0.3,0.04],\"color\":[0.8,0.8,0.85]},{\"shape\":\"torus\",\"pos\":[-0.2,0,0],\"rot\":[0,0,90],\"scale\":[0.06,0.018,0.018],\"color\":[0.2,0.4,0.9]},{\"shape\":\"torus\",\"pos\":[-0.07,0,0],\"rot\":[0,0,90],\"scale\":[0.06,0.018,0.018],\"color\":[0.2,0.4,0.9]},{\"shape\":\"torus\",\"pos\":[0.06,0,0],\"rot\":[0,0,90],\"scale\":[0.06,0.018,0.018],\"color\":[0.2,0.4,0.9]},{\"shape\":\"torus\",\"pos\":[0.19,0,0],\"rot\":[0,0,90],\"scale\":[0.06,0.018,0.018],\"color\":[0.2,0.4,0.9]},{\"shape\":\"sphere\",\"pos\":[0.32,0,0],\"rot\":[0,0,0],\"scale\":[0.07,0.07,0.07],\"color\":[0.9,0.75,0.1]},{\"shape\":\"cylinder\",\"pos\":[-0.33,0,0],\"rot\":[0,0,90],\"scale\":[0.025,0.04,0.025],\"color\":[0.5,0.5,0.55]}]";
 
+    /// <summary>思考进度（流式期间实时上报，主线程回调）</summary>
+    public class ThinkProgress
+    {
+        public float elapsed;      // 已耗时（秒）
+        public int reasoningChars; // 思维链已生成字符数
+        public int answerChars;    // 正式答案已生成字符数
+        public string tail;        // 思维链最近片段（单行截断）
+    }
+
     /// <summary>
     /// 发送指令文本，返回模型回复内容。失败时返回 null 并输出错误。
+    /// onProgress：流式期间每 0.5 秒上报一次思考进度（可传 null）。
     /// </summary>
-    public static async Task<string> AskAsync(string apiKey, string userText, string model, int maxTokens = 8000)
+    public static async Task<string> AskAsync(string apiKey, string userText, string model,
+                                               System.Action<ThinkProgress> onProgress = null,
+                                               int maxTokens = 8000)
     {
         var body = new JSONObject();
         body["model"] = model;
         body["temperature"] = 0.0;
         body["max_tokens"] = maxTokens;
-        body["stream"] = false;
+        body["stream"] = true; // 流式：思维链 token 持续推送，连接不空闲 → 不会被网关掐断
 
         // 关闭深度思考：跳过思维链直接输出答案，大幅缩短响应时间。
         // 注意：glm-5.3 系列（含 flash）不支持 disabled——参数被忽略，思维链照常输出
@@ -85,21 +92,22 @@ public static class LLMClient
         //    glm-5.3 系列：无 thinking + response_format + 大 max_tokens）
         // 2. 去 response_format（个别模型不支持 JSON 模式）
         // 3. 去 thinking（仅非 5.3 模型：关思考失败时宁可慢也要拿到结果）
-        string reply = await SendAsync(apiKey, body.ToString());
+        string reply = await SendAsync(apiKey, body.ToString(), onProgress);
         if (reply == null)
         {
             body.Remove("response_format");
-            reply = await SendAsync(apiKey, body.ToString());
+            reply = await SendAsync(apiKey, body.ToString(), onProgress);
         }
         if (reply == null)
         {
             body.Remove("thinking");
-            reply = await SendAsync(apiKey, body.ToString());
+            reply = await SendAsync(apiKey, body.ToString(), onProgress);
         }
         return reply;
     }
 
-    static async Task<string> SendAsync(string apiKey, string jsonBody)
+    static async Task<string> SendAsync(string apiKey, string jsonBody,
+                                        System.Action<ThinkProgress> onProgress)
     {
         using (var req = new UnityWebRequest(Endpoint, "POST"))
         {
@@ -107,9 +115,55 @@ public static class LLMClient
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
             req.SetRequestHeader("Authorization", "Bearer " + apiKey);
-            req.timeout = TimeoutSeconds;
+            req.timeout = 0; // 关闭整体超时，改用空闲看门狗（流式期间字节持续到达，整体计时没有意义）
 
-            await req.SendWebRequest();
+            var op = req.SendWebRequest();
+
+            // 空闲看门狗：连续 TimeoutSeconds 没有收到新字节才中止（网络真断）。
+            // 流式思维链会持续推送数据，正常长思考不会触发。
+            long lastBytes = 0;
+            float idle = 0f;
+            float reportT = 0f;
+            float startT = Time.realtimeSinceStartup;
+            var sse = new SseAccumulator();
+            while (!op.isDone)
+            {
+                await Task.Delay(100);
+                long got = (long)req.downloadedBytes;
+                if (got != lastBytes) { lastBytes = got; idle = 0f; }
+                else
+                {
+                    idle += 0.1f;
+                    if (idle >= TimeoutSeconds)
+                    {
+                        Debug.LogWarning($"[GLM] 流式连接空闲超过 {TimeoutSeconds}s，中止请求");
+                        req.Abort();
+                        break;
+                    }
+                }
+
+                // 每 0.5 秒解析一次已到达的 SSE 数据，上报思考进度
+                if (onProgress != null)
+                {
+                    reportT += 0.1f;
+                    if (reportT >= 0.5f)
+                    {
+                        reportT = 0f;
+                        try
+                        {
+                            sse.Feed(req.downloadHandler.text);
+                            onProgress(new ThinkProgress
+                            {
+                                elapsed = Time.realtimeSinceStartup - startT,
+                                reasoningChars = sse.ReasoningLength,
+                                answerChars = sse.ContentLength,
+                                tail = sse.ReasoningTail(40),
+                            });
+                        }
+                        catch (Exception e) { Debug.LogWarning($"[GLM] 进度解析异常: {e.Message}"); }
+                    }
+                }
+            }
 
             if (req.result != UnityWebRequest.Result.Success)
             {
@@ -117,9 +171,96 @@ public static class LLMClient
                 return null;
             }
 
-            var json = JSONNode.Parse(req.downloadHandler.text);
-            var content = json?["choices"]?[0]?["message"]?["content"];
-            return content?.Value?.Trim();
+            return ParseSseContent(req.downloadHandler.text);
+        }
+    }
+
+    /// <summary>
+    /// 解析 SSE 流式响应：逐行取 "data: {...}" 的 choices[0].delta.content 拼接成完整回复。
+    /// 思维链增量在 reasoning_content 字段，不拼接。
+    /// </summary>
+    static string ParseSseContent(string sse)
+    {
+        if (string.IsNullOrEmpty(sse)) return null;
+        var sb = new StringBuilder();
+        int start = 0;
+        while (start < sse.Length)
+        {
+            int end = sse.IndexOf('\n', start);
+            if (end < 0) end = sse.Length;
+            var line = sse.Substring(start, end - start).Trim();
+            start = end + 1;
+
+            if (!line.StartsWith("data:")) continue;
+            var payload = line.Substring(5).Trim();
+            if (payload == "[DONE]") break;
+            if (payload.Length == 0) continue;
+
+            try
+            {
+                var json = JSONNode.Parse(payload);
+                var delta = json?["choices"]?[0]?["delta"]?["content"];
+                if (!string.IsNullOrEmpty(delta?.Value)) sb.Append(delta.Value);
+            }
+            catch (Exception) { /* 跳过半行/心跳帧等非 JSON 片段 */ }
+        }
+        var content = sb.ToString().Trim();
+        return content.Length > 0 ? content : null;
+    }
+
+    /// <summary>
+    /// SSE 增量累积器：只处理已到达数据中的完整行，分别累积
+    /// reasoning_content（思维链）与 content（正式答案），供进度展示。
+    /// </summary>
+    sealed class SseAccumulator
+    {
+        int consumed;
+        readonly StringBuilder reasoning = new StringBuilder();
+        readonly StringBuilder content = new StringBuilder();
+
+        public int ReasoningLength => reasoning.Length;
+        public int ContentLength => content.Length;
+
+        public void Feed(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            int lastNl = s.LastIndexOf('\n');
+            if (lastNl < consumed) return;           // 没有新的完整行
+            string chunk = s.Substring(consumed, lastNl + 1 - consumed);
+            consumed = lastNl + 1;
+
+            int start = 0;
+            while (start < chunk.Length)
+            {
+                int end = chunk.IndexOf('\n', start);
+                if (end < 0) end = chunk.Length;
+                var line = chunk.Substring(start, end - start).Trim();
+                start = end + 1;
+
+                if (!line.StartsWith("data:")) continue;
+                var payload = line.Substring(5).Trim();
+                if (payload.Length == 0 || payload == "[DONE]") continue;
+                try
+                {
+                    var json = JSONNode.Parse(payload);
+                    var delta = json?["choices"]?[0]?["delta"];
+                    var rc = delta?["reasoning_content"]?.Value;
+                    if (!string.IsNullOrEmpty(rc)) reasoning.Append(rc);
+                    var cc = delta?["content"]?.Value;
+                    if (!string.IsNullOrEmpty(cc)) content.Append(cc);
+                }
+                catch (Exception) { /* 半行/心跳帧忽略 */ }
+            }
+        }
+
+        /// <summary>思维链末尾片段（去换行，用于展示"AI 正在想什么"）</summary>
+        public string ReasoningTail(int maxChars)
+        {
+            int len = reasoning.Length;
+            if (len == 0) return "";
+            int take = Math.Min(maxChars, len);
+            return reasoning.ToString(len - take, take)
+                             .Replace("\r", "").Replace("\n", " ").Trim();
         }
     }
 
