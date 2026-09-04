@@ -1,8 +1,11 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Networking;
 
 /// <summary>
 /// AI 语音宠物编排器：
@@ -26,7 +29,7 @@ public class AIVoicePet : MonoBehaviour
     [Header("GLM 大模型")]
     [Tooltip("GLM 模型名")]
     public string glmModel = "glm-5.3-flash";
-    [Tooltip("智谱开放平台 API Key（open.bigmodel.cn，必填——所有构建都由 GLM 完成）")]
+    [Tooltip("智谱开放平台 API Key（open.bigmodel.cn）。留空则启动时从 Assets/StreamingAssets/glm_key.txt 读取（该文件已 gitignore，不会上传）")]
     public string glmApiKey = "";
 
     [Header("行为参数")]
@@ -46,6 +49,8 @@ public class AIVoicePet : MonoBehaviour
     bool aiBusy;
     bool grammarActive;    // 当前是否处于唤醒词语法模式
     string lastBuildLabel = ""; // 构建完成提示用
+    string apiKey;         // 运行时生效的密钥：Inspector 优先，否则从 StreamingAssets/glm_key.txt 读取
+    const string KeyFileName = "glm_key.txt"; // 本地密钥文件（已 gitignore，随包发布）
 
     // 唤醒词“你好”（含同音容错写法）
     static readonly string[] WakeWords = { "你好", "您好", "拟好" };
@@ -79,6 +84,8 @@ public class AIVoicePet : MonoBehaviour
         vosk.OnStatusUpdated += OnVoskStatus;
 
         if (Pet != null) Pet.OnBuildComplete += OnBuildComplete;
+
+        apiKey = glmApiKey; // Inspector 填写优先；为空则 Start 时从本地密钥文件读取
     }
 
     void Start()
@@ -88,6 +95,43 @@ public class AIVoicePet : MonoBehaviour
             ui.SetStatus("语音模型加载中…");
             ui.SetHint("加载完成后说“你好”唤醒我");
         }
+
+        // 密钥分离：Inspector 未填时从 StreamingAssets/glm_key.txt 读取
+        //（该文件已加入 .gitignore：本地打包正常带上 key，git 上传不会带走）
+        if (string.IsNullOrEmpty(apiKey)) StartCoroutine(LoadLocalKey());
+    }
+
+    /// <summary>
+    /// 读取本地密钥文件，取首个非注释行。
+    /// Android 上 StreamingAssets 打包在 APK 内，必须用 UnityWebRequest 而非 File.IO。
+    /// </summary>
+    IEnumerator LoadLocalKey()
+    {
+        string path = Path.Combine(Application.streamingAssetsPath, KeyFileName);
+#if UNITY_EDITOR || UNITY_STANDALONE
+        if (File.Exists(path)) apiKey = FirstKeyLine(File.ReadAllText(path));
+        else Debug.LogWarning($"[AIPet] 未找到本地密钥文件: {path}");
+        yield break; // 编辑器/PC 同步读取：含 yield 才是迭代器方法，否则 CS0161
+#else
+        using (var req = UnityWebRequest.Get(path))
+        {
+            yield return req.SendWebRequest();
+            if (req.result == UnityWebRequest.Result.Success) apiKey = FirstKeyLine(req.downloadHandler.text);
+            else Debug.LogWarning($"[AIPet] 读取本地密钥文件失败: {req.error}");
+        }
+#endif
+    }
+
+    /// <summary>取文件中第一个非空且非 # 注释的行作为密钥</summary>
+    static string FirstKeyLine(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        foreach (var raw in text.Split('\n'))
+        {
+            var s = raw.Trim();
+            if (s.Length > 0 && !s.StartsWith("#")) return s;
+        }
+        return "";
     }
 
     void Update()
@@ -245,14 +289,14 @@ public class AIVoicePet : MonoBehaviour
         bool built = false;
 
         // 所有构建全部走 GLM 蓝图：任意物体 → 基础几何体组合（网络失败自动重试一次）
-        if (string.IsNullOrEmpty(glmApiKey))
+        if (string.IsNullOrEmpty(apiKey))
         {
             // 未配置 Key：无法构建，明确提示
             tts?.Speak("请先配置大模型密钥");
             if (ui != null)
             {
                 ui.SetStatus("未配置 GLM API Key");
-                ui.SetHint("请在 Inspector 的 glmApiKey 填入智谱开放平台密钥");
+                ui.SetHint("请在 Assets/StreamingAssets/glm_key.txt 填入密钥（该文件不上传 git）");
             }
             Pet.SetState(PetState.Awake);
             wakeDeadline = Time.time + listenTimeout;
@@ -266,18 +310,45 @@ public class AIVoicePet : MonoBehaviour
             try
             {
                 // 单次调用：超时/失败不自动重连（重试只会再等一轮超时），直接回监听。
-                // 流式进度：每 0.5s 上报思维链长度/最近内容，UI 上画伪进度条
-                reply = await LLMClient.AskAsync(glmApiKey, raw, glmModel, p =>
+                // 流式进度条设计：
+                // - 思维链总长度无法预知，用时间渐近曲线持续爬升（前快后慢、无限逼近88%），
+                //   永远不会像旧版"字符数/2400"那样长时间钉死在 90%；
+                // - 正式答案一旦开始流式输出即接近完成，映射到 88%~99%；
+                // - 降级重试时进度不清零：单调递增（只升不降）+ 提示"第N次尝试"，耗时跨次累计。
+                float shownPct = 0f;   // 已展示过的最大进度（单调不回退）
+                float timeBase = 0f;   // 前几次尝试的累计耗时（秒）
+                float lastElapsed = 0f;// 本次尝试最近一次上报的耗时（秒）
+                int lastAttempt = 1;
+                reply = await LLMClient.AskAsync(apiKey, raw, glmModel, p =>
                 {
                     if (ui == null) return;
-                    float pct = p.answerChars > 0
-                        ? Mathf.Min(99f, 90f + 9f * Mathf.Clamp01(p.answerChars / 900f))
-                        : Mathf.Min(90f, 100f * p.reasoningChars / 2400f);
-                    int bars = Mathf.RoundToInt(pct / 10f);
+
+                    // 检测到新一轮尝试：把上一次的耗时计入总时长
+                    if (p.attempt != lastAttempt)
+                    {
+                        timeBase += lastElapsed;
+                        lastAttempt = p.attempt;
+                        lastElapsed = 0f;
+                    }
+                    lastElapsed = p.elapsed;
+                    float totalT = timeBase + p.elapsed;
+
+                    float pct;
+                    if (p.answerChars > 0)
+                        // 答案已开始输出：收尾段 88→99%
+                        pct = 88f + 11f * Mathf.Clamp01(p.answerChars / 900f);
+                    else
+                        // 思维链阶段：88 * t/(t+15)，5s≈22%、15s≈44%、30s≈59%、60s≈68%
+                        pct = 88f * (totalT / (totalT + 15f));
+                    shownPct = Mathf.Max(shownPct, pct); // 单调递增：重试/网络抖动不让进度倒退
+
+                    int bars = Mathf.RoundToInt(shownPct / 10f);
                     var sb = new StringBuilder(96);
-                    sb.Append("思考 ").Append(p.elapsed.ToString("0")).Append("s [")
+                    sb.Append("思考 ").Append(totalT.ToString("0")).Append("s [")
                       .Append('#', bars).Append('-', 10 - bars).Append("] ")
-                      .Append(pct.ToString("0")).Append('%');
+                      .Append(shownPct.ToString("0")).Append('%');
+                    if (lastAttempt > 1)
+                        sb.Append(" 网络波动,第").Append(lastAttempt).Append("次尝试");
                     if (!string.IsNullOrEmpty(p.tail))
                         sb.Append('\n').Append(p.tail);
                     ui.SetHint(sb.ToString());

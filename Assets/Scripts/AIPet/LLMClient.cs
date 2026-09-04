@@ -44,6 +44,7 @@ public static class LLMClient
         public int reasoningChars; // 思维链已生成字符数
         public int answerChars;    // 正式答案已生成字符数
         public string tail;        // 思维链最近片段（单行截断）
+        public int attempt = 1;    // 第几次尝试（1 起）：降级重试后递增，UI 据此提示"重试中"
     }
 
     /// <summary>
@@ -92,22 +93,23 @@ public static class LLMClient
         //    glm-5.3 系列：无 thinking + response_format + 大 max_tokens）
         // 2. 去 response_format（个别模型不支持 JSON 模式）
         // 3. 去 thinking（仅非 5.3 模型：关思考失败时宁可慢也要拿到结果）
-        string reply = await SendAsync(apiKey, body.ToString(), onProgress);
+        string reply = await SendAsync(apiKey, body.ToString(), onProgress, 1);
         if (reply == null)
         {
             body.Remove("response_format");
-            reply = await SendAsync(apiKey, body.ToString(), onProgress);
+            reply = await SendAsync(apiKey, body.ToString(), onProgress, 2);
         }
         if (reply == null)
         {
             body.Remove("thinking");
-            reply = await SendAsync(apiKey, body.ToString(), onProgress);
+            reply = await SendAsync(apiKey, body.ToString(), onProgress, 3);
         }
         return reply;
     }
 
     static async Task<string> SendAsync(string apiKey, string jsonBody,
-                                        System.Action<ThinkProgress> onProgress)
+                                        System.Action<ThinkProgress> onProgress,
+                                        int attempt = 1)
     {
         using (var req = new UnityWebRequest(Endpoint, "POST"))
         {
@@ -158,6 +160,7 @@ public static class LLMClient
                                 reasoningChars = sse.ReasoningLength,
                                 answerChars = sse.ContentLength,
                                 tail = sse.ReasoningTail(40),
+                                attempt = attempt,
                             });
                         }
                         catch (Exception e) { Debug.LogWarning($"[GLM] 进度解析异常: {e.Message}"); }

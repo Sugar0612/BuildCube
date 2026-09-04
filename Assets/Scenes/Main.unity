@@ -5912,7 +5912,7 @@ MonoBehaviour:
   voskModelPath: vosk-model-small-cn-0.22.zip
   useWakeGrammar: 1
   enableTTS: 1
-  glmModel: glm-5.3
+  glmModel: glm-5.3-flash
   glmApiKey: 
   listenTimeout: 12
   builtHoldTime: 45

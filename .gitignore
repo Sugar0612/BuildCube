@@ -105,3 +105,7 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# 本地 API 密钥（本地开发/打包用，不上传 git）
+/[Aa]ssets/StreamingAssets/glm_key.txt
+/[Aa]ssets/StreamingAssets/glm_key.txt.meta
