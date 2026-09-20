@@ -8,19 +8,24 @@ using UnityEngine;
 using UnityEngine.Networking;
 
 /// <summary>
-/// AI 语音宠物编排器：
-/// 1. Vosk 离线识别持续监听：待机时用限定语法精准检测“你好”，唤醒后切自由识别；
-/// 2. 唤醒后聆听“构建xxx”指令，语音播报（Android TTS）回应；
-/// 3. 指令全部交给 GLM 规划成几何体蓝图（无本地形状兜底）；
-/// 4. 驱动 ParticlePet 呈现 待机→唤醒→思考→构建 的形态变化。
+/// 化学分子 MR 助手编排器（v2：全息舞台 + 反应分析）：
+/// 1. 唤醒词"你好"由 Vosk 离线限定语法负责；命令语音走智谱 GLM-ASR 云端识别（化学热词加成）；
+/// 2. 说出物质 → GLM 解析候选 + PubChem 预校验 → 确认卡片点选 → 全息舞台飞入缩小版球棍模型
+///    （统一真实比例、各自独立旋转、框下显示名字）；舞台渐进生长：一个分子填入后
+///    才出现加号和下一个相框（最多 4 个反应物）；
+/// 3. 集齐 ≥2 个反应物后可点「开始反应」或说"开始反应"：GLM 分析 →「=」出现 →
+///    产物逐个解析上台；方程式/条件/可行性显示在右侧面板；
+/// 4. 手柄/手掌可拨动全息粒子（斥力避让）。
 /// </summary>
 public class AIVoicePet : MonoBehaviour
 {
-    [Header("语音识别（Vosk 离线）")]
-    [Tooltip("StreamingAssets 下的模型文件名")]
+    [Header("语音识别")]
+    [Tooltip("StreamingAssets 下的 Vosk 模型文件名（负责唤醒词）")]
     public string voskModelPath = "vosk-model-small-cn-0.22.zip";
     [Tooltip("待机时是否启用限定语法（只听唤醒词，识别更准）")]
     public bool useWakeGrammar = true;
+    [Tooltip("命令语音走智谱云端识别（GLM-ASR，化学术语更准）；关闭则回退 Vosk 自由识别")]
+    public bool useCloudSTT = true;
 
     [Header("语音播报（TTS）")]
     [Tooltip("是否启用语音播报（真机 Android 系统 TTS）")]
@@ -33,40 +38,46 @@ public class AIVoicePet : MonoBehaviour
     public string glmApiKey = "";
 
     [Header("行为参数")]
-    [Tooltip("唤醒后等待指令的时长（秒）")]
+    [Tooltip("唤醒后等待指令的时长（秒）；上台后同样是连续添加的自由聆听窗口时长")]
     public float listenTimeout = 12f;
-    [Tooltip("构建完成后保持展示的时长（秒）；展示中说“你好”可提前打断进入下一轮聆听")]
-    public float builtHoldTime = 45f;
+    [Tooltip("确认卡片等待操作的超时（秒），超时自动收起")]
+    public float confirmTimeout = 120f;
 
     public ParticlePet Pet { get; private set; }
 
+    ChemUIController chemUI;
+    MoleculeTray tray;
+    HoloTray holo;
+    EquationBench bench;
+    VoiceCapture capture;
     PetStatusUI ui;
     VoskSpeechToText vosk;
     VoiceProcessor voice;
     AndroidTTS tts;
     float wakeDeadline;
-    float builtAt = -999f;
-    bool aiBusy;
+    float listenDeadline = -999f;  // 自由聆听窗口截止时间
+    float confirmDeadline;
+    bool aiBusy;           // 解析/确认流程进行中：抑制语音与超时
+    bool awaitingConfirm;  // 确认卡片展示中
+    bool listenWindow;     // 自由聆听窗口（连续添加分子无需反复唤醒）
     bool grammarActive;    // 当前是否处于唤醒词语法模式
-    string lastBuildLabel = ""; // 构建完成提示用
+    bool asrBusy;          // 云端识别进行中（避免重复提交）
     string apiKey;         // 运行时生效的密钥：Inspector 优先，否则从 StreamingAssets/glm_key.txt 读取
     const string KeyFileName = "glm_key.txt"; // 本地密钥文件（已 gitignore，随包发布）
+
+    // 思考进度条（单调不回退，多个 GLM 请求间共用）
+    float shownPct, timeBase, lastElapsed;
+    int lastAttempt = 1;
+
+    // 反应产物（按产物槽位；反应物变化即失效重算）
+    readonly Molecule[] productSlots = new Molecule[EquationBench.ProductSlots];
 
     // 唤醒词“你好”（含同音容错写法）
     static readonly string[] WakeWords = { "你好", "您好", "拟好" };
     static readonly string[] BuildVerbs = { "构建", "建造", "搭建", "创建", "生成" };
 
-    // 待机限定语法：唤醒词 + 一句话指令（动词+常见物体，供待机时直接说完整指令）
-    static readonly string[] IdleGrammar =
-    {
-        "你好", "您好",
-        // "构建立方体", "构建方块", "构建正方体",
-        // "构建球体", "构建圆球", "构建球",
-        // "构建圆柱", "构建圆柱体",
-        // "构建圆锥", "构建圆锥体",
-        // "构建圆环", "构建圆环体",
-        // "构建金字塔", "构建角锥",
-    };
+    // 待机限定语法：唤醒词（唤醒后云端识别命令，或本地模式切自由识别）
+    static readonly string[] IdleGrammar = { "你好", "您好" };
 
     void Awake()
     {
@@ -83,7 +94,23 @@ public class AIVoicePet : MonoBehaviour
         vosk.OnTranscriptionResult += OnTranscriptJson;
         vosk.OnStatusUpdated += OnVoskStatus;
 
-        if (Pet != null) Pet.OnBuildComplete += OnBuildComplete;
+        // 化学 UI：确认卡片 + 分子列表面板 + 方程式舞台 + 全息粒子 + 命令录音器
+        chemUI = gameObject.AddComponent<ChemUIController>();
+        tray = gameObject.AddComponent<MoleculeTray>();
+        bench = gameObject.AddComponent<EquationBench>();
+        holo = gameObject.AddComponent<HoloTray>();
+        capture = gameObject.AddComponent<VoiceCapture>();
+        capture.OnWavReady += OnCaptureWav;
+        holo.SetSlots(bench.Anchors);
+        chemUI.CandidatePicked += OnCandidatePicked;
+        chemUI.Respeak += OnRespeak;
+        chemUI.Cancelled += OnCancelCard;
+        chemUI.ManualSubmitted += OnManualSubmitted;
+        chemUI.KeyboardClosed += OnKeyboardClosed;
+        tray.AddRequested += OnTrayAddRequested;
+        tray.KeyboardInputRequested += OnTrayKeyboardRequested;
+        tray.ReactRequested += OnBenchReactRequested;
+        tray.TrayChanged += OnTrayChanged;
 
         apiKey = glmApiKey; // Inspector 填写优先；为空则 Start 时从本地密钥文件读取
     }
@@ -138,21 +165,24 @@ public class AIVoicePet : MonoBehaviour
     {
         if (Pet == null) return;
 
-        // 唤醒超时 → 回到待机
-        if (Pet.State == PetState.Awake && Time.time > wakeDeadline)
+        // 确认卡片超时：自动收起（全息分子不受影响）
+        if (awaitingConfirm && Time.time > confirmDeadline)
         {
-            Pet.SetState(PetState.Idle);
-            SetGrammarMode(true);
-            SetIdleUI();
+            chemUI.Hide();
+            GoIdle();
+            return;
         }
 
-        // 构建完成后保持一段时间 → 回到待机球体
-        if (Pet.State == PetState.Built && Time.time > builtAt + builtHoldTime)
-        {
-            Pet.SetState(PetState.Idle);
-            SetGrammarMode(true);
-            SetIdleUI();
-        }
+        if (aiBusy) return; // 流程进行中不处理超时（内部自行管理状态）
+
+        // 唤醒超时 → 回到待机
+        if (Pet.State == PetState.Awake && Time.time > wakeDeadline)
+            GoIdle();
+
+        // 自由聆听窗口结束 → 收回唤醒词语法、停止录音（全息分子保留）
+        // 录音或云端识别进行中时顺延，避免说完一句被窗口掐断
+        if (listenWindow && Time.time > listenDeadline && !capture.Capturing && !asrBusy)
+            CloseListenWindow();
     }
 
     // ---------------- 麦克风开关 ----------------
@@ -172,9 +202,47 @@ public class AIVoicePet : MonoBehaviour
         }
     }
 
+    // ---------------- 自由聆听窗口 ----------------
+
+    /// <summary>开启自由聆听窗口：连续说指令无需反复唤醒；云端模式下同时开始命令录音</summary>
+    void StartListenWindow()
+    {
+        listenWindow = true;
+        listenDeadline = Time.time + listenTimeout;
+        if (useCloudSTT)
+        {
+            SetGrammarMode(true);  // Vosk 只负责唤醒词，避免与云端识别重复
+            if (voice != null && voice.IsRecording) capture.Begin(voice);
+        }
+        else
+        {
+            SetGrammarMode(false); // 本地模式：Vosk 自由识别
+        }
+    }
+
+    /// <summary>结束自由聆听窗口</summary>
+    void EndListenWindow()
+    {
+        listenWindow = false;
+        capture.End();
+    }
+
+    /// <summary>窗口结束：收回唤醒词语法，全息分子保留</summary>
+    void CloseListenWindow()
+    {
+        EndListenWindow();
+        SetGrammarMode(true);
+        if (ui != null)
+        {
+            ui.SetStatus($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}（待机中）");
+            ui.SetHeard("");
+            ui.SetHint("说「你好」继续添加，或点面板按钮操作");
+        }
+    }
+
     // ---------------- 语法切换（提升识别准确度） ----------------
 
-    /// <summary>切换 Vosk 识别语法：true=待机限定语法（唤醒词极准），false=自由识别（任意物体名）</summary>
+    /// <summary>切换 Vosk 识别语法：true=待机限定语法（唤醒词极准），false=自由识别（本地模式用）</summary>
     void SetGrammarMode(bool idle)
     {
         if (vosk == null || !useWakeGrammar || grammarActive == idle) return;
@@ -206,13 +274,14 @@ public class AIVoicePet : MonoBehaviour
 
     void OnTranscriptJson(string json)
     {
+        float confidence = 0f;
         string text;
         try
         {
             var result = new RecognitionResult(json);
-            text = result.Phrases != null && result.Phrases.Length > 0
-                ? result.Phrases[0].Text
-                : "";
+            if (result.Phrases == null || result.Phrases.Length == 0) return;
+            text = result.Phrases[0].Text;
+            confidence = result.Phrases[0].Confidence;
         }
         catch (Exception e)
         {
@@ -222,12 +291,51 @@ public class AIVoicePet : MonoBehaviour
 
         if (string.IsNullOrWhiteSpace(text)) return;
 
+        // 云端模式下 Vosk 只跑唤醒词语法，不会产出命令文本
         string norm = Normalize(text);
         if (ui != null) ui.SetHeard(text);
-        HandleText(text, norm);
+        HandleText(text, norm, confidence);
     }
 
-    void HandleText(string raw, string norm)
+    /// <summary>一句话录完 → 云端识别 → 走统一文本处理</summary>
+    async Task OnCaptureWavAsync(byte[] wav)
+    {
+        if (asrBusy) return;
+        asrBusy = true;
+        if (ui != null) ui.SetStatus("识别中…");
+        string text = null;
+        try
+        {
+            text = await GLMASR.TranscribeAsync(apiKey, wav);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[AIPet] 云端识别异常: {e.Message}");
+        }
+        asrBusy = false;
+
+        // 识别期间窗口可能已关闭/进入流程
+        if (!listenWindow || aiBusy) return;
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            if (ui != null) ui.SetStatus("没听清，请再说一遍");
+            if (voice != null && voice.IsRecording) capture.Begin(voice); // 继续录
+            return;
+        }
+
+        text = text.Trim();
+        if (ui != null) ui.SetHeard(text);
+        HandleText(text, Normalize(text), 1f);
+
+        // 处理后若仍在窗口（如只是唤醒词刷新）且录音器空闲 → 继续录
+        if (listenWindow && !aiBusy && !capture.Capturing && voice != null && voice.IsRecording)
+            capture.Begin(voice);
+    }
+
+    void OnCaptureWav(byte[] wav) => _ = OnCaptureWavAsync(wav);
+
+    void HandleText(string raw, string norm, float confidence)
     {
         if (Pet == null || aiBusy) return;
 
@@ -237,188 +345,393 @@ public class AIVoicePet : MonoBehaviour
                 if (IsWake(norm))
                 {
                     Wake();
-                    if (HasBuildVerb(norm)) _ = TryBuildAsync(raw, norm);
+                    RouteCommand(raw, norm, confidence);
+                }
+                else if (listenWindow)
+                {
+                    // 自由聆听窗口：连续报下一个分子无需再喊“你好”
+                    if (!RouteCommand(raw, norm, confidence))
+                        _ = BeginConfirmAsync(raw, confidence);
                 }
                 break;
 
             case PetState.Awake:
-                // 构建指令优先：一句话“你好，构建立方体”也要能直接触发构建
-                if (HasBuildVerb(norm)) { _ = TryBuildAsync(raw, norm); break; }
-                if (IsWake(norm)) Wake();
+                // 唤醒后自由聆听：指令优先；非唤醒词的普通话语直接当作物质名解析
+                if (!RouteCommand(raw, norm, confidence) && !IsWake(norm))
+                    _ = BeginConfirmAsync(raw, confidence);
                 break;
 
             case PetState.Built:
-                // 展示阶段可被语音打断：新的构建指令直接开新一轮；“你好”回到监听
-                if (HasBuildVerb(norm)) { _ = TryBuildAsync(raw, norm); break; }
-                if (IsWake(norm))
-                {
-                    Pet.SetState(PetState.Awake);
-                    Wake();
-                }
+            case PetState.Building:
+                if (RouteCommand(raw, norm, confidence)) break;
+                if (IsWake(norm)) Wake();
+                else _ = BeginConfirmAsync(raw, confidence);
                 break;
         }
+    }
+
+    /// <summary>路由显式指令。返回 true 表示已命中（清空/开始反应/构建动词）。</summary>
+    bool RouteCommand(string raw, string norm, float confidence)
+    {
+        if (norm.Contains("清空"))
+        {
+            if (tray.Count > 0)
+            {
+                tray.Clear(); // TrayChanged 事件负责全息台与面板同步
+                tts?.SpeakText("展示台已清空");
+            }
+            else if (ui != null) ui.SetHint("展示台本来就是空的");
+            return true;
+        }
+        if (norm.Contains("开始反应") || norm.Contains("合成") || norm.Contains("反应"))
+        {
+            _ = BenchReactAsync();
+            return true;
+        }
+        if (HasBuildVerb(norm))
+        {
+            _ = BeginConfirmAsync(raw, confidence);
+            return true;
+        }
+        return false;
     }
 
     // ---------------- 流程控制 ----------------
 
     void Wake()
     {
-        Pet.SetState(PetState.Awake);
+        Pet.SetState(PetState.Awake); // 全息分子独立于智能球，不受状态切换影响
         wakeDeadline = Time.time + listenTimeout;
-        SetGrammarMode(false); // 唤醒后：自由识别（可说任意物体）
+        StartListenWindow();
         tts?.Speak("在的");
         if (ui != null)
         {
-            // 粒子回应“在的”，提示聆听构建指令
             ui.SetStatus("在的");
-            ui.SetHint($"请说“构建 某物”，如：构建立方体（{Mathf.CeilToInt(wakeDeadline - Time.time)} 秒）");
+            ui.SetHint(tray.Count > 0
+                ? $"说“构建 某分子”继续上台（{Mathf.CeilToInt(listenTimeout)} 秒）；说「清空」重置"
+                : "说“构建 水分子”或直接说物质名");
         }
     }
 
-    async Task TryBuildAsync(string raw, string norm)
+    /// <summary>解析用户输入为候选物质并弹出确认卡片（解决 STT 不准：由用户点选/输入纠错）</summary>
+    async Task BeginConfirmAsync(string raw, float sttConfidence)
     {
         aiBusy = true;
-        Pet.SetState(PetState.Thinking);
-        SetMic(false); // 思考阶段不收语音：关麦省电，结束后恢复
-        if (ui != null)
+        EndListenWindow();
+        if (tray.IsFull)
         {
-            ui.SetStatus("AI 思考中…");
-            ui.SetHint("正在规划模型蓝图");
-        }
-
-        bool built = false;
-
-        // 所有构建全部走 GLM 蓝图：任意物体 → 基础几何体组合（网络失败自动重试一次）
-        if (string.IsNullOrEmpty(apiKey))
-        {
-            // 未配置 Key：无法构建，明确提示
-            tts?.Speak("请先配置大模型密钥");
-            if (ui != null)
-            {
-                ui.SetStatus("未配置 GLM API Key");
-                ui.SetHint("请在 Assets/StreamingAssets/glm_key.txt 填入密钥（该文件不上传 git）");
-            }
-            Pet.SetState(PetState.Awake);
-            wakeDeadline = Time.time + listenTimeout;
-            aiBusy = false;
-            SetMic(true);
+            tts?.SpeakText("展示台已满，请先清空或移除一个分子");
+            if (ui != null) ui.SetHint($"展示台已满 {tray.Count}/{MoleculeTray.MaxSlots}；点面板「清空展示台」或行尾 × 移除");
+            GoIdle();
             return;
         }
 
-        {
-            string reply = null;
-            try
-            {
-                // 单次调用：超时/失败不自动重连（重试只会再等一轮超时），直接回监听。
-                // 流式进度条设计：
-                // - 思维链总长度无法预知，用时间渐近曲线持续爬升（前快后慢、无限逼近88%），
-                //   永远不会像旧版"字符数/2400"那样长时间钉死在 90%；
-                // - 正式答案一旦开始流式输出即接近完成，映射到 88%~99%；
-                // - 降级重试时进度不清零：单调递增（只升不降）+ 提示"第N次尝试"，耗时跨次累计。
-                float shownPct = 0f;   // 已展示过的最大进度（单调不回退）
-                float timeBase = 0f;   // 前几次尝试的累计耗时（秒）
-                float lastElapsed = 0f;// 本次尝试最近一次上报的耗时（秒）
-                int lastAttempt = 1;
-                reply = await LLMClient.AskAsync(apiKey, raw, glmModel, p =>
-                {
-                    if (ui == null) return;
-
-                    // 检测到新一轮尝试：把上一次的耗时计入总时长
-                    if (p.attempt != lastAttempt)
-                    {
-                        timeBase += lastElapsed;
-                        lastAttempt = p.attempt;
-                        lastElapsed = 0f;
-                    }
-                    lastElapsed = p.elapsed;
-                    float totalT = timeBase + p.elapsed;
-
-                    float pct;
-                    if (p.answerChars > 0)
-                        // 答案已开始输出：收尾段 88→99%
-                        pct = 88f + 11f * Mathf.Clamp01(p.answerChars / 900f);
-                    else
-                        // 思维链阶段：88 * t/(t+15)，5s≈22%、15s≈44%、30s≈59%、60s≈68%
-                        pct = 88f * (totalT / (totalT + 15f));
-                    shownPct = Mathf.Max(shownPct, pct); // 单调递增：重试/网络抖动不让进度倒退
-
-                    int bars = Mathf.RoundToInt(shownPct / 10f);
-                    var sb = new StringBuilder(96);
-                    sb.Append("思考 ").Append(totalT.ToString("0")).Append("s [")
-                      .Append('#', bars).Append('-', 10 - bars).Append("] ")
-                      .Append(shownPct.ToString("0")).Append('%');
-                    if (lastAttempt > 1)
-                        sb.Append(" 网络波动,第").Append(lastAttempt).Append("次尝试");
-                    if (!string.IsNullOrEmpty(p.tail))
-                        sb.Append('\n').Append(p.tail);
-                    ui.SetHint(sb.ToString());
-                });
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[AIPet] GLM 调用异常: {e.Message}");
-            }
-
-            if (!string.IsNullOrEmpty(reply))
-            {
-                var parts = LLMClient.ParseBlueprint(reply);
-
-                if (parts != null && parts.Count == 0)
-                {
-                    // AI 明确表示不认识该物体，直接告知
-                    tts?.Speak("不知道那是什么");
-                    if (ui != null)
-                    {
-                        ui.SetStatus($"我不认识“{raw}”");
-                        ui.SetHint("换个常见的物体试试，如：构建立方体");
-                    }
-                    Pet.SetState(PetState.Awake);
-                    wakeDeadline = Time.time + listenTimeout;
-                    aiBusy = false;
-                    SetMic(true);
-                    return;
-                }
-
-                if (parts != null && parts.Count > 0)
-                {
-                    if (ui != null)
-                    {
-                        ui.SetStatus($"正在构建：{raw}");
-                        ui.SetHint($"GLM 蓝图：{parts.Count} 个部件");
-                    }
-                    lastBuildLabel = $"{raw}（{parts.Count} 部件）";
-                    Pet.BuildBlueprint(parts);
-                    built = true;
-                }
-            }
-        }
-
-        if (!built)
-        {
-            tts?.Speak("没听清要构建什么，请再说一遍");
-            if (ui != null)
-            {
-                ui.SetStatus("GLM 连接失败或返回无法解析");
-                ui.SetHint("请检查网络和 API Key 后重试");
-            }
-            Pet.SetState(PetState.Awake);
-            wakeDeadline = Time.time + listenTimeout;
-        }
-
-        aiBusy = false;
-        SetMic(true); // 思考结束（进入构建/唤醒），恢复语音监听
-    }
-
-    void OnBuildComplete()
-    {
-        builtAt = Time.time;
-        SetMic(true); // 构建完成：确保麦克风恢复（展示阶段可语音打断）
-        tts?.Speak("构建完成");
+        SetMic(false);
+        chemUI.Hide();
+        Pet.SetState(PetState.Thinking); // 思考态宇宙场景（全息分子独立展示，不受影响）
+        ResetProgress();
         if (ui != null)
         {
-            ui.SetStatus($"构建完成：{lastBuildLabel} ✓");
-            ui.SetHint($"说“你好”进入下一轮聆听（{Mathf.CeilToInt(builtHoldTime)} 秒后自动待机）");
+            ui.SetStatus("正在解析化学物质…");
+            ui.SetHint($"「{raw}」");
         }
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            tts?.Speak("请先配置大模型密钥");
+            BackToListen("未配置 GLM API Key", "请在 Assets/StreamingAssets/glm_key.txt 填入密钥");
+            return;
+        }
+
+        List<ChemCandidate> cands = null;
+        try
+        {
+            cands = await ChemistryLLM.InterpretAsync(apiKey, glmModel, raw, sttConfidence, HintProgress);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[AIPet] 化学解析异常: {e.Message}");
+        }
+
+        Pet.SetState(PetState.Awake);
+        if (cands == null) cands = new List<ChemCandidate>();
+
+        awaitingConfirm = true;
+        confirmDeadline = Time.time + confirmTimeout;
+        chemUI.Show(raw, cands);
+        if (ui != null)
+        {
+            ui.SetStatus(cands.Count > 0 ? "请点选候选物质" : "未识别出化学物质");
+            ui.SetHint("选中后放上展示台；也可手动输入或重说");
+        }
+        // aiBusy 保持 true：卡片期间抑制语音（操作走手柄/键盘）
+    }
+
+    /// <summary>候选选中 → 解析结构 → 全息台飞入缩小版分子，智能球回归待机</summary>
+    async Task ResolveAndAddToTrayAsync(ChemCandidate cand)
+    {
+        awaitingConfirm = false;
+        chemUI.Hide();
+        SetMic(false);
+        Pet.SetState(PetState.Thinking);
+        ResetProgress();
+        if (ui != null)
+        {
+            ui.SetStatus("正在获取分子结构…");
+            ui.SetHint(cand.DisplayName());
+        }
+
+        var mol = await ResolveMoleculeAsync(cand);
+        if (mol == null)
+        {
+            tts?.SpeakText("没有找到该物质的结构");
+            BackToListen("结构获取失败", $"展示台保留 {tray.Count}/{MoleculeTray.MaxSlots} 个分子；请换个名称重试");
+            return;
+        }
+
+        if (!tray.TryAdd(mol))
+        {
+            tts?.SpeakText("展示台已满，请先清空或移除一个分子");
+            GoIdle();
+            return;
+        }
+        // TryAdd 触发 TrayChanged → 全息台/圆盘已同步；智能球回归待机球体
+        Pet.SetState(PetState.Idle);
+
+        string tag = mol.fromCache ? "（本地缓存）"
+            : mol.source == MoleculeSource.GLM ? "（AI 估算，未经校验）" : "（PubChem 校验）";
+        aiBusy = false;
+        SetMic(true);
+        StartListenWindow(); // 自由聆听窗口：可连续报下一个分子
+        if (ui != null)
+        {
+            ui.SetStatus($"已上台：{mol.DisplayName()} {mol.formula}{tag} ✓");
+            ui.SetHint($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}；继续说下一个分子（{Mathf.CeilToInt(listenTimeout)} 秒内），说「清空」重置");
+        }
+    }
+
+    /// <summary>三级解析：本地缓存 → PubChem → GLM 兜底（统一入口，带 UI 过程提示）</summary>
+    async Task<Molecule> ResolveMoleculeAsync(ChemCandidate cand)
+    {
+        try
+        {
+            return await ChemistryLLM.ResolveAsync(cand, apiKey, glmModel, s => { if (ui != null) ui.SetHint(s); });
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[AIPet] 结构解析异常: {e.Message}");
+            return null;
+        }
+    }
+
+    // ---------------- 展示台事件 ----------------
+
+    void OnTrayAddRequested()
+    {
+        if (aiBusy) return;
+        Wake();
+        if (ui != null) ui.SetHint("请说分子名，或再点“手动输入”用键盘");
+    }
+
+    /// <summary>面板「开始反应」按钮 → 反应流程</summary>
+    void OnBenchReactRequested() => _ = BenchReactAsync();
+
+    /// <summary>台上分子被移除/添加/清空：反应物变化使旧反应结果失效，舞台回到渐进模式</summary>
+    void OnTrayChanged()
+    {
+        System.Array.Clear(productSlots, 0, productSlots.Length); // 产物失效
+        SyncStage(Mathf.Clamp(tray.Count + 1, 1, EquationBench.ReactantSlots), 0, false);
+
+        if (tray.Count > 0)
+        {
+            if (listenWindow) listenDeadline = Time.time + listenTimeout;
+            if (!aiBusy && ui != null)
+                ui.SetStatus($"展示台更新：{tray.Count}/{MoleculeTray.MaxSlots} 个分子");
+        }
+        else
+        {
+            EndListenWindow();
+            if (!aiBusy)
+            {
+                SetGrammarMode(true);
+                SetMic(true);
+                SetIdleUI();
+                if (ui != null) ui.SetHint("展示台已清空，说「你好」重新开始");
+            }
+        }
+    }
+
+    /// <summary>组合 8 槽数组（前 4 反应物 + 后 4 产物）并同步全息台与舞台</summary>
+    Molecule[] CombinedSlots()
+    {
+        var arr = new Molecule[EquationBench.TotalSlots];
+        var r = tray.MoleculesBySlot();
+        for (int i = 0; i < EquationBench.ReactantSlots && i < r.Length; i++) arr[i] = r[i];
+        for (int j = 0; j < EquationBench.ProductSlots; j++)
+            arr[EquationBench.ReactantSlots + j] = productSlots[j];
+        return arr;
+    }
+
+    /// <summary>同步全息分子、相框占据/名字与渐进形态</summary>
+    void SyncStage(int reactantFrames, int productFrames, bool equals)
+    {
+        var combined = CombinedSlots();
+        holo.SetMolecules(combined);
+        bench.SetFilled(combined);
+        bench.SetStage(reactantFrames, productFrames, equals);
+    }
+
+    /// <summary>开始反应：GLM 分析 → 「=」出现 → 产物逐个解析上舞台</summary>
+    async Task BenchReactAsync()
+    {
+        if (aiBusy) return;
+        if (tray.Count < 2)
+        {
+            tts?.SpeakText("反应至少需要两种反应物");
+            if (ui != null) ui.SetHint($"当前 {tray.Count} 种反应物，至少需要 2 种");
+            return;
+        }
+
+        aiBusy = true;
+        EndListenWindow();
+        SetMic(false);
+        Pet.SetState(PetState.Thinking);
+        ResetProgress();
+        if (ui != null)
+        {
+            ui.SetStatus("正在分析反应…");
+            ui.SetHint("GLM 推断方程式与产物");
+        }
+
+        ReactionResult r = null;
+        try
+        {
+            r = await ChemistryLLM.ReactAsync(apiKey, glmModel, tray.Candidates(), HintProgress);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[AIPet] 反应分析异常: {e.Message}");
+        }
+
+        if (r == null)
+        {
+            tts?.SpeakText("反应分析失败");
+            BackToListen("反应分析失败", "请检查网络后重试");
+            return;
+        }
+
+        tray.ShowResult(r);
+        System.Array.Clear(productSlots, 0, productSlots.Length);
+
+        if (!r.feasible)
+        {
+            tts?.SpeakText("该反应难以进行");
+            BackToListen("该反应难以进行", "详见右侧面板说明");
+            return;
+        }
+
+        // 「=」先出现，然后产物解析成功一个上台一个
+        int nR = tray.Count; // 反应完成后反应物区不再显示待填空框
+        SyncStage(nR, 0, true);
+        if (ui != null) ui.SetStatus("正在获取产物结构…");
+
+        int shown = 0;
+        foreach (var pc in r.products)
+        {
+            if (shown >= EquationBench.ProductSlots) break;
+            Molecule pm = null;
+            try { pm = await ResolveMoleculeAsync(pc); }
+            catch (Exception) { /* 解析失败保留 null 占位 */ }
+            productSlots[shown++] = pm;
+            SyncStage(nR, shown, true);
+        }
+
+        tts?.Speak("构建完成");
+        aiBusy = false;
+        SetMic(true);
+        StartListenWindow();
+        if (ui != null)
+        {
+            ui.SetStatus($"反应完成：{r.equation}");
+            ui.SetHint("产物已上台；说「清空」重置展示台");
+        }
+    }
+
+    /// <summary>右侧面板「键盘输入」：直接打开系统键盘（不依赖语音，首次使用也能添加分子）</summary>
+    void OnTrayKeyboardRequested()
+    {
+        if (aiBusy) return;
+        capture.End(); // 键盘输入期间停录音
+        chemUI.OpenManualInput();
+        if (ui != null) ui.SetHint("请在键盘输入物质名或分子式");
+    }
+
+    /// <summary>键盘关闭（取消/失焦且仍在聆听窗口时恢复录音）</summary>
+    void OnKeyboardClosed(bool submitted)
+    {
+        if (!submitted && listenWindow && !aiBusy && !capture.Capturing
+            && voice != null && voice.IsRecording)
+            capture.Begin(voice);
+    }
+
+    // ---------------- 确认卡片回调 ----------------
+
+    void OnCandidatePicked(ChemCandidate c)
+    {
+        if (c == null || !awaitingConfirm) return;
+        _ = ResolveAndAddToTrayAsync(c);
+    }
+
+    void OnRespeak()
+    {
+        if (!awaitingConfirm) return;
+        awaitingConfirm = false;
+        chemUI.Hide();
+        BackToListen("好的，请说物质名", "可直接说，如：水分子、甲烷");
+    }
+
+    void OnCancelCard()
+    {
+        if (!awaitingConfirm) return;
+        chemUI.Hide();
+        GoIdle();
+    }
+
+    void OnManualSubmitted(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || aiBusy) return;
+        // 确认卡片上的手动输入 → 重新解析；右侧面板键盘输入 → 直接进入解析流程
+        _ = BeginConfirmAsync(text.Trim(), 1f);
+    }
+
+    // ---------------- 状态回退 ----------------
+
+    /// <summary>回到唤醒聆听态（麦克风开、计时重置；全息分子保留）</summary>
+    void BackToListen(string status, string hint)
+    {
+        Pet.SetState(PetState.Awake);
+        wakeDeadline = Time.time + listenTimeout;
+        aiBusy = false;
+        awaitingConfirm = false;
+        SetMic(true);
+        StartListenWindow();
+        if (ui != null)
+        {
+            ui.SetStatus(status);
+            ui.SetHint(hint);
+        }
+    }
+
+    /// <summary>回到待机球体（全息分子独立保留）</summary>
+    void GoIdle()
+    {
+        EndListenWindow();
+        SetGrammarMode(true);
+        Pet.SetState(PetState.Idle);
+        aiBusy = false;
+        awaitingConfirm = false;
+        SetMic(true);
+        SetIdleUI();
     }
 
     void SetIdleUI()
@@ -426,7 +739,52 @@ public class AIVoicePet : MonoBehaviour
         if (ui == null) return;
         ui.SetStatus("待机中");
         ui.SetHeard("");
-        ui.SetHint("说“你好”唤醒我");
+        ui.SetHint(tray.Count > 0
+            ? $"展示台保留 {tray.Count}/{MoleculeTray.MaxSlots} 个分子；说「你好」继续添加"
+            : "说“你好”唤醒我");
+    }
+
+    // ---------------- 思考进度（单调不回退） ----------------
+
+    void ResetProgress()
+    {
+        shownPct = 0f;
+        timeBase = 0f;
+        lastElapsed = 0f;
+        lastAttempt = 1;
+    }
+
+    /// <summary>流式思考进度 → UI 提示行（时间渐近爬升，答案期收尾；跨重试累计不倒退）</summary>
+    void HintProgress(LLMClient.ThinkProgress p)
+    {
+        if (ui == null) return;
+
+        if (p.attempt != lastAttempt)
+        {
+            timeBase += lastElapsed;
+            lastAttempt = p.attempt;
+            lastElapsed = 0f;
+        }
+        lastElapsed = p.elapsed;
+        float totalT = timeBase + p.elapsed;
+
+        float pct;
+        if (p.answerChars > 0)
+            pct = 88f + 11f * Mathf.Clamp01(p.answerChars / 900f);
+        else
+            pct = 88f * (totalT / (totalT + 15f));
+        shownPct = Mathf.Max(shownPct, pct);
+
+        int bars = Mathf.RoundToInt(shownPct / 10f);
+        var sb = new StringBuilder(96);
+        sb.Append("思考 ").Append(totalT.ToString("0")).Append("s [")
+          .Append('#', bars).Append('-', 10 - bars).Append("] ")
+          .Append(shownPct.ToString("0")).Append('%');
+        if (lastAttempt > 1)
+            sb.Append(" 网络波动,第").Append(lastAttempt).Append("次尝试");
+        if (!string.IsNullOrEmpty(p.tail))
+            sb.Append('\n').Append(p.tail);
+        ui.SetHint(sb.ToString());
     }
 
     // ---------------- 文本工具 ----------------
@@ -452,10 +810,10 @@ public class AIVoicePet : MonoBehaviour
 
     // ---------------- 调试接口 ----------------
 
-    /// <summary>模拟一句语音输入（编辑器/联调测试用）</summary>
+    /// <summary>模拟一句语音输入（编辑器/联调测试用，走完整化学确认流程）</summary>
     public void DebugSimulate(string transcript)
     {
         if (ui != null) ui.SetHeard(transcript);
-        HandleText(transcript, Normalize(transcript));
+        HandleText(transcript, Normalize(transcript), 1f);
     }
 }

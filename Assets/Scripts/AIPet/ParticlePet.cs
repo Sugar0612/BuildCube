@@ -473,12 +473,21 @@ public class ParticlePet : MonoBehaviour
     }
 
     /// <summary>
-    /// 按 AI 规划的蓝图构建：粒子按部件体积占比分配，
+    /// 按 AI 规划的蓝图构建：粒子按部件体积占比分配（小部件保底），
     /// 各自在部件局部空间采样表面点，再经旋转/平移变换到宠物局部空间。
     /// 粒子池按蓝图总表面积自动扩充（上限 maxParticleCapacity），
     /// 每次构建前从基础数量重新计算（即"下一次开始前重置"）。
     /// </summary>
     public void BuildBlueprint(List<ShapePart> parts)
+    {
+        BuildBlueprint(parts, null, 0.008f);
+    }
+
+    /// <summary>
+    /// 加权版构建：weights[p] 为每部件的粒子分配权重（如球棍模型按表面积分配），
+    /// minWeight 为单部件权重下限；weights 为 null 时沿用旧的"体积占比 + 0.008 保底"规则。
+    /// </summary>
+    public void BuildBlueprint(List<ShapePart> parts, float[] weights, float minWeight)
     {
         if (parts == null || parts.Count == 0) return;
 
@@ -504,14 +513,17 @@ public class ParticlePet : MonoBehaviour
         int n = ActiveCount;
         int pn = parts.Count;
 
-        // 按体积占比分配粒子数（小部件保底，避免细节丢失）
+        // 按权重占比分配粒子数
         float[] w = new float[pn];
         float total = 0f;
         for (int p = 0; p < pn; p++)
         {
             var sp = parts[p].scale;
-            w[p] = Mathf.Max(sp.x * sp.y * sp.z, 0.008f);
-            total += w[p];
+            float wv = weights != null && p < weights.Length
+                ? Mathf.Max(weights[p], minWeight)
+                : Mathf.Max(sp.x * sp.y * sp.z, 0.008f);
+            w[p] = wv;
+            total += wv;
         }
 
         int cur = 0;
@@ -563,9 +575,11 @@ public class ParticlePet : MonoBehaviour
     void InitCosmosScene()
     {
         int cap = particles.Length;
-        int planets = Mathf.Clamp(planetCount, 1, 48);
+        // v2 调优：黑色空间雾（暗幕粒子）按需求去掉；近处星球数量收拢并推远，
+        // 视觉聚焦在银河本体与远处星辰上（场景里序列化的旧值不再生效）。
+        int planets = Mathf.Min(planetCount, 10);
         int stars = Mathf.Clamp(starCount, 0, 1200);
-        int nebulae = Mathf.Clamp(nebulaCount, 0, 4000);
+        int nebulae = 0;
         int minTotal = 800 + planets * 80 + stars + nebulae;
         int total = Mathf.Clamp(Mathf.Max(thinkParticleCount, minTotal), minTotal, cap);
 
@@ -615,7 +629,7 @@ public class ParticlePet : MonoBehaviour
         plTwDur = new float[planets];
 
         float half = cosmosSize * 0.5f;
-        float minCore = galaxyRadius + 0.15f; // 星球紧贴银河外缘，形成致密星团
+        float minCore = galaxyRadius + 0.5f; // 星球离银河主体更远，近处不再拥挤
         for (int p = 0; p < planets; p++)
         {
             plRadius[p] = UnityEngine.Random.Range(planetSizeRange.x, planetSizeRange.y);
@@ -625,13 +639,12 @@ public class ParticlePet : MonoBehaviour
             plTwNext[p] = UnityEngine.Random.Range(1f, 6f);
             plTwProg[p] = -1f;
 
-            // 拒绝采样：环带分布（紧贴银河、外圈稀疏）且互不重叠
+            // 拒绝采样：环带分布（离银河更远、分布更均匀）且互不重叠
             Vector3 pos = Vector3.zero;
             for (int tries = 0; tries < 24; tries++)
             {
-                // 随机方向 × 内偏半径（幂次越高越向内聚），高度压扁贴近银盘
                 Vector2 dir = UnityEngine.Random.insideUnitCircle.normalized;
-                float rr = minCore + Mathf.Pow(UnityEngine.Random.value, 2.2f) * (half - minCore);
+                float rr = minCore + UnityEngine.Random.value * (half - minCore);
                 pos = new Vector3(dir.x * rr,
                                   UnityEngine.Random.Range(-0.5f, 0.9f) * (0.3f + rr * 0.25f),
                                   dir.y * rr);
@@ -831,7 +844,8 @@ public class ParticlePet : MonoBehaviour
 
     Material particleMaterial;
 
-    Material CreateParticleMaterial()
+    /// <summary>程序化创建粒子材质（兜底用；HoloTray 无材质资产时也复用）</summary>
+    public Material CreateParticleMaterial()
     {
         if (particleMaterial != null) return particleMaterial;
 

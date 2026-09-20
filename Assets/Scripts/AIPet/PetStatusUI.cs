@@ -7,8 +7,8 @@ using UnityEngine.UI;
 /// </summary>
 public class PetStatusUI : MonoBehaviour
 {
-    [Tooltip("面板中心相对宠物中心的高度（米）")]
-    public float heightAbove = 0.45f;
+    [Tooltip("面板中心相对宠物中心的高度（米）：位于智能球与方程式舞台之间，与两者都不重叠）")]
+    public float heightAbove = 0.35f;
 
     [Tooltip("面板宽（米）")]
     public float widthMeters = 0.6f;

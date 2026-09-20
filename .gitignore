@@ -109,3 +109,8 @@ InitTestScene*.unity*
 # 本地 API 密钥（本地开发/打包用，不上传 git）
 /[Aa]ssets/StreamingAssets/glm_key.txt
 /[Aa]ssets/StreamingAssets/glm_key.txt.meta
+
+# ZCode 会话与构建日志（本地文件，不入库）
+/.zcode/
+/.vsconfig
+build_log.txt

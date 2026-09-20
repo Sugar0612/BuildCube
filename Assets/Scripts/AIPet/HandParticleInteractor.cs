@@ -3,7 +3,8 @@ using Unity.XR.PXR;
 
 /// <summary>
 /// 手部粒子交互器：从 PICO 手部追踪读取左右手的掌心和 5 个指尖位置，
-/// 传给 ParticlePet 作为斥力碰撞点——粒子靠近手会被推开、绕过手继续运动。
+/// 传给 ParticlePet 与 HoloTray 作为斥力碰撞点——粒子靠近手会被推开、绕过手继续运动
+///（智能球粒子有弹簧回弹；全息分子呈瞬时避让形变，手离开即恢复）。
 /// 编辑器内按住鼠标左键可用光标模拟一只手（投到宠物前方平面上）。
 /// 需要 PXR_ProjectSetting 中 handTracking 开启。
 /// </summary>
@@ -11,6 +12,9 @@ public class HandParticleInteractor : MonoBehaviour
 {
     [Tooltip("目标粒子宠物（留空则取同物体上的 ParticlePet）")]
     public ParticlePet pet;
+
+    [Tooltip("全息分子展示台（留空则取同物体上的 HoloTray）")]
+    public HoloTray holo;
 
     [Tooltip("XR Origin（关节坐标是 tracking space，需要经它转世界坐标；留空自动查找）")]
     public Transform xrOrigin;
@@ -34,6 +38,7 @@ public class HandParticleInteractor : MonoBehaviour
     void Start()
     {
         if (pet == null) pet = GetComponent<ParticlePet>();
+        if (holo == null) holo = GetComponent<HoloTray>();
         if (xrOrigin == null)
         {
             var origin = FindFirstObjectByType<Unity.XR.CoreUtils.XROrigin>();
@@ -58,6 +63,7 @@ public class HandParticleInteractor : MonoBehaviour
                 {
                     worldPoints[n++] = ray.GetPoint(dist);
                     pet.SetHandPoints(worldPoints, n);
+                    holo?.SetHandPoints(worldPoints, n);
                     return;
                 }
             }
@@ -70,6 +76,7 @@ public class HandParticleInteractor : MonoBehaviour
         n += CollectController(PXR_Input.Controller.RightController, n);
         n += CollectHead(n);
         pet?.SetHandPoints(worldPoints, n);
+        holo?.SetHandPoints(worldPoints, n);
     }
 
     /// <summary>收集一只手的关节点并转世界坐标，返回收集到的点数（手不在视野返回 0）</summary>

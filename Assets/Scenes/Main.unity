@@ -5928,7 +5928,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ef0258f55ee78fa419d7539a1db4b4f4, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PetStatusUI
-  heightAbove: 0.45
+  heightAbove: 0.35
   widthMeters: 0.6
 --- !u!114 &1905823309
 MonoBehaviour:
