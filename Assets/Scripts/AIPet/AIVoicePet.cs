@@ -59,9 +59,12 @@ public class AIVoicePet : MonoBehaviour
     float confirmDeadline;
     bool aiBusy;           // 解析/确认流程进行中：抑制语音与超时
     bool awaitingConfirm;  // 确认卡片展示中
+    bool userAbort;        // 用户按了「停止思考」：中止在途请求后静默退出，不报失败
     bool listenWindow;     // 自由聆听窗口（连续添加分子无需反复唤醒）
     bool grammarActive;    // 当前是否处于唤醒词语法模式
     bool asrBusy;          // 云端识别进行中（避免重复提交）
+    bool micWanted = true; // 期望麦克风开启（仅思考期间关麦；看门狗据此自愈）
+    float micRetryAt;      // 看门狗下次重试时刻
     string apiKey;         // 运行时生效的密钥：Inspector 优先，否则从 StreamingAssets/glm_key.txt 读取
     const string KeyFileName = "glm_key.txt"; // 本地密钥文件（已 gitignore，随包发布）
 
@@ -107,6 +110,7 @@ public class AIVoicePet : MonoBehaviour
         chemUI.Cancelled += OnCancelCard;
         chemUI.ManualSubmitted += OnManualSubmitted;
         chemUI.KeyboardClosed += OnKeyboardClosed;
+        chemUI.StopRequested += OnStopThinking;
         tray.AddRequested += OnTrayAddRequested;
         tray.KeyboardInputRequested += OnTrayKeyboardRequested;
         tray.ReactRequested += OnBenchReactRequested;
@@ -165,6 +169,17 @@ public class AIVoicePet : MonoBehaviour
     {
         if (Pet == null) return;
 
+        // 麦克风看门狗：系统键盘唤起/失焦时安卓可能静默杀掉录音（表现为再也识别不到任何语音）。
+        // 期望开麦但实际不在录 → 周期自动重开。须在 aiBusy 早退之前；且等 Vosk 初始化完成，
+        // 否则会抢在 ToggleRecording 之前开麦，导致其反向关麦并终止识别线程。
+        if (micWanted && vosk != null && vosk.IsInitialized && voice != null
+            && !voice.IsRecording && Time.time >= micRetryAt)
+        {
+            micRetryAt = Time.time + 1.5f;
+            Debug.Log("[AIPet] 看门狗：麦克风未在录，尝试重开");
+            SetMic(true);
+        }
+
         // 确认卡片超时：自动收起（全息分子不受影响）
         if (awaitingConfirm && Time.time > confirmDeadline)
         {
@@ -172,6 +187,9 @@ public class AIVoicePet : MonoBehaviour
             GoIdle();
             return;
         }
+
+        // 「停止思考」按钮：仅在思考中显示（必须在 aiBusy 早退之前，否则思考期间永远执行不到）
+        chemUI.ShowStop(aiBusy && Pet.State == PetState.Thinking);
 
         if (aiBusy) return; // 流程进行中不处理超时（内部自行管理状态）
 
@@ -190,6 +208,7 @@ public class AIVoicePet : MonoBehaviour
     /// <summary>开/关麦克风采集。思考阶段无语音交互意义，关麦省电并避免误识别。</summary>
     void SetMic(bool on)
     {
+        micWanted = on;
         if (voice == null) return;
         try
         {
@@ -199,6 +218,17 @@ public class AIVoicePet : MonoBehaviour
         catch (Exception e)
         {
             Debug.LogWarning($"[AIPet] 麦克风切换失败: {e.Message}");
+        }
+    }
+
+    /// <summary>恢复焦点（关掉系统键盘/切回应用）：失焦期间被安卓杀掉的麦克风立即按需重开</summary>
+    void OnApplicationFocus(bool hasFocus)
+    {
+        if (hasFocus && micWanted && vosk != null && vosk.IsInitialized
+            && voice != null && !voice.IsRecording)
+        {
+            Debug.Log("[AIPet] 失焦恢复，重开麦克风");
+            SetMic(true);
         }
     }
 
@@ -417,6 +447,7 @@ public class AIVoicePet : MonoBehaviour
     async Task BeginConfirmAsync(string raw, float sttConfidence)
     {
         aiBusy = true;
+        userAbort = false;
         EndListenWindow();
         if (tray.IsFull)
         {
@@ -453,6 +484,8 @@ public class AIVoicePet : MonoBehaviour
             Debug.LogWarning($"[AIPet] 化学解析异常: {e.Message}");
         }
 
+        if (userAbort) { AbortToListen(); return; } // 用户中止：静默退出
+
         Pet.SetState(PetState.Awake);
         if (cands == null) cands = new List<ChemCandidate>();
 
@@ -474,6 +507,7 @@ public class AIVoicePet : MonoBehaviour
         chemUI.Hide();
         SetMic(false);
         Pet.SetState(PetState.Thinking);
+        userAbort = false;
         ResetProgress();
         if (ui != null)
         {
@@ -484,6 +518,7 @@ public class AIVoicePet : MonoBehaviour
         var mol = await ResolveMoleculeAsync(cand);
         if (mol == null)
         {
+            if (userAbort) { AbortToListen(); return; } // 用户中止：静默退出
             tts?.SpeakText("没有找到该物质的结构");
             BackToListen("结构获取失败", $"展示台保留 {tray.Count}/{MoleculeTray.MaxSlots} 个分子；请换个名称重试");
             return;
@@ -495,18 +530,18 @@ public class AIVoicePet : MonoBehaviour
             GoIdle();
             return;
         }
-        // TryAdd 触发 TrayChanged → 全息台/圆盘已同步；智能球回归待机球体
+        // TryAdd 触发 TrayChanged → 全息台/舞台已同步；智能球回归待机球体
         Pet.SetState(PetState.Idle);
 
         string tag = mol.fromCache ? "（本地缓存）"
             : mol.source == MoleculeSource.GLM ? "（AI 估算，未经校验）" : "（PubChem 校验）";
+        // 生成完成即回待机：不再连续监听，下一句需重新说「你好」唤醒
         aiBusy = false;
-        SetMic(true);
-        StartListenWindow(); // 自由聆听窗口：可连续报下一个分子
+        GoIdle();
         if (ui != null)
         {
             ui.SetStatus($"已上台：{mol.DisplayName()} {mol.formula}{tag} ✓");
-            ui.SetHint($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}；继续说下一个分子（{Mathf.CeilToInt(listenTimeout)} 秒内），说「清空」重置");
+            ui.SetHint($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}；已回待机，说「你好」继续添加");
         }
     }
 
@@ -596,6 +631,7 @@ public class AIVoicePet : MonoBehaviour
         EndListenWindow();
         SetMic(false);
         Pet.SetState(PetState.Thinking);
+        userAbort = false;
         ResetProgress();
         if (ui != null)
         {
@@ -615,6 +651,7 @@ public class AIVoicePet : MonoBehaviour
 
         if (r == null)
         {
+            if (userAbort) { AbortToListen(); return; } // 用户中止：静默退出
             tts?.SpeakText("反应分析失败");
             BackToListen("反应分析失败", "请检查网络后重试");
             return;
@@ -642,18 +679,19 @@ public class AIVoicePet : MonoBehaviour
             Molecule pm = null;
             try { pm = await ResolveMoleculeAsync(pc); }
             catch (Exception) { /* 解析失败保留 null 占位 */ }
+            if (userAbort) break; // 用户中止：保留已上台的产物即止
             productSlots[shown++] = pm;
             SyncStage(nR, shown, true);
         }
 
         tts?.Speak("构建完成");
+        // 反应完成即回待机
         aiBusy = false;
-        SetMic(true);
-        StartListenWindow();
+        GoIdle();
         if (ui != null)
         {
             ui.SetStatus($"反应完成：{r.equation}");
-            ui.SetHint("产物已上台；说「清空」重置展示台");
+            ui.SetHint("产物已上台；已回待机，说「你好」继续，说「清空」重置展示台");
         }
     }
 
@@ -669,8 +707,10 @@ public class AIVoicePet : MonoBehaviour
     /// <summary>键盘关闭（取消/失焦且仍在聆听窗口时恢复录音）</summary>
     void OnKeyboardClosed(bool submitted)
     {
-        if (!submitted && listenWindow && !aiBusy && !capture.Capturing
-            && voice != null && voice.IsRecording)
+        if (submitted || aiBusy) return;
+        // 键盘/失焦期间麦克风可能被系统杀掉：先确保在录，再恢复命令采集
+        SetMic(true);
+        if (listenWindow && !capture.Capturing && voice != null && voice.IsRecording)
             capture.Begin(voice);
     }
 
@@ -699,9 +739,32 @@ public class AIVoicePet : MonoBehaviour
 
     void OnManualSubmitted(string text)
     {
-        if (string.IsNullOrWhiteSpace(text) || aiBusy) return;
-        // 确认卡片上的手动输入 → 重新解析；右侧面板键盘输入 → 直接进入解析流程
+        if (string.IsNullOrWhiteSpace(text)) return;
+        // 确认卡片展示中（aiBusy 恒 true，不能一并拦截）：手动输入 = 换个名字重新解析
+        if (awaitingConfirm)
+        {
+            awaitingConfirm = false;
+            chemUI.Hide();
+        }
+        else if (aiBusy) return;
         _ = BeginConfirmAsync(text.Trim(), 1f);
+    }
+
+    /// <summary>「停止思考」按钮：中止在途 GLM 请求，流程静默退出回聆听</summary>
+    void OnStopThinking()
+    {
+        if (!aiBusy || Pet == null || Pet.State != PetState.Thinking) return;
+        userAbort = true;
+        LLMClient.AbortAll();
+        tts?.SpeakText("已停止");
+        if (ui != null) ui.SetStatus("已停止思考");
+    }
+
+    /// <summary>用户中止后的统一退出（不报失败）</summary>
+    void AbortToListen()
+    {
+        userAbort = false;
+        BackToListen("已停止思考", "说「构建 某分子」重新开始");
     }
 
     // ---------------- 状态回退 ----------------

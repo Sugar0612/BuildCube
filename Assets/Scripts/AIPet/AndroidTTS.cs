@@ -90,6 +90,10 @@ public class AndroidTTS : MonoBehaviour
 #endif
     }
 
+    /// <summary>本地短语音频是否正在播放（系统 TTS 无法获知状态，由 VoiceCapture 启动丢弃窗口兜底）；
+    /// VoiceCapture 据此在播报期间丢弃麦克风帧，防止扬声器自听被识别成命令</summary>
+    public bool IsPlaying => audioSource != null && audioSource.isPlaying;
+
     void Update()
     {
         if (audioSource != null && !Mathf.Approximately(audioSource.volume, volume))

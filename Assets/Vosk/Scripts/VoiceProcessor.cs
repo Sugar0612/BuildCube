@@ -204,10 +204,24 @@ public class VoiceProcessor : MonoBehaviour
             return;
         }
 
+        // 僵尸会话清理：失焦/系统键盘遮挡时安卓可能静默终止录音，旧 clip 残留但不再产出数据。
+        // 不先显式 End 的话，安卓可能拒绝再次开启麦克风（表现为再也识别不到语音）。
+        if (_audioClip != null)
+        {
+            Microphone.End(CurrentDeviceName);
+            Destroy(_audioClip);
+            _audioClip = null;
+        }
+
         SampleRate = sampleRate;
         FrameLength = frameSize;
 
         _audioClip = Microphone.Start(CurrentDeviceName, true, 1, sampleRate);
+        if (_audioClip == null)
+        {
+            Debug.LogError("[VoiceProcessor] Microphone.Start 失败（权限被拒或设备被占用），稍后由看门狗重试");
+            return;
+        }
 
         StartCoroutine(RecordData());
     }
@@ -217,15 +231,26 @@ public class VoiceProcessor : MonoBehaviour
     /// </summary>
     public void StopRecording()
     {
-        if (!IsRecording)
-            return;
+        bool wasRecording = IsRecording;
+        if (!wasRecording && _audioClip == null) return;
 
+        // 无论是否系统判定为录音中，只要 clip 存在就显式 End + Destroy，
+        // 确保失焦/系统杀死后设备被释放，且 RestartRecording 能触发
         Microphone.End(CurrentDeviceName);
         Destroy(_audioClip);
         _audioClip = null;
         _didDetect = false;
 
         StopCoroutine(RecordData());
+
+        // 必须触发：让等待换设备/换参数的 RestartRecording 回调执行
+        if (wasRecording && OnRecordingStop != null)
+            OnRecordingStop.Invoke();
+        if (RestartRecording != null)
+        {
+            RestartRecording.Invoke();
+            RestartRecording = null;
+        }
     }
 
     /// <summary>

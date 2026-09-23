@@ -19,6 +19,17 @@ public static class LLMClient
     /// 思维链生成期间 token 持续推送，正常永远不会触发；只有网络真断了才会超时。</summary>
     public const int TimeoutSeconds = 300;
 
+    /// <summary>中止纪元：AbortAll() 递增后在途请求立即中断，且不再走降级重试。
+    /// 「停止思考」按钮用——思考时间过长时用户可手动打断。</summary>
+    static int abortEpoch = 0;
+
+    /// <summary>中止所有在途流式请求；中止之后的调用按新纪元正常运行</summary>
+    public static void AbortAll()
+    {
+        abortEpoch++;
+        Debug.Log("[GLM] AbortAll：中止在途请求");
+    }
+
     /// <summary>思考进度（流式期间实时上报，主线程回调）</summary>
     public class ThinkProgress
     {
@@ -75,17 +86,19 @@ public static class LLMClient
         messages.Add(usr);
         body["messages"] = messages;
 
+        int epoch = abortEpoch; // 捕获纪元：AbortAll 后本调用立即放弃（含降级重试）
+
         // 分级降级重试：
         // 1. 初始配置
         // 2. 去 response_format（个别模型不支持 JSON 模式）
         // 3. 去 thinking（仅非 5.3 模型：关思考失败时宁可慢也要拿到结果）
         string reply = await SendAsync(apiKey, body.ToString(), onProgress, 1);
-        if (reply == null && jsonMode)
+        if (reply == null && jsonMode && epoch == abortEpoch)
         {
             body.Remove("response_format");
             reply = await SendAsync(apiKey, body.ToString(), onProgress, 2);
         }
-        if (reply == null && supportsThinkingDisabled)
+        if (reply == null && supportsThinkingDisabled && epoch == abortEpoch)
         {
             body.Remove("thinking");
             reply = await SendAsync(apiKey, body.ToString(), onProgress, 3);
@@ -106,6 +119,7 @@ public static class LLMClient
             req.timeout = 0; // 关闭整体超时，改用空闲看门狗（流式期间字节持续到达，整体计时没有意义）
 
             var op = req.SendWebRequest();
+            int epoch = abortEpoch;
 
             // 空闲看门狗：连续 TimeoutSeconds 没有收到新字节才中止（网络真断）。
             // 流式思维链会持续推送数据，正常长思考不会触发。
@@ -117,6 +131,13 @@ public static class LLMClient
             while (!op.isDone)
             {
                 await Task.Delay(100);
+                if (epoch != abortEpoch)
+                {
+                    // 用户主动中止（停止思考按钮）
+                    req.Abort();
+                    Debug.Log("[GLM] 流式请求被用户中止");
+                    return null;
+                }
                 long got = (long)req.downloadedBytes;
                 if (got != lastBytes) { lastBytes = got; idle = 0f; }
                 else

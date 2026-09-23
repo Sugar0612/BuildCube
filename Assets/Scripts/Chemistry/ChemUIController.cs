@@ -16,10 +16,13 @@ public class ChemUIController : MonoBehaviour
     public event System.Action<string> ManualSubmitted;
     /// <summary>系统键盘关闭（true=已提交文本；false=取消/失焦），用于恢复录音等收尾</summary>
     public event System.Action<bool> KeyboardClosed;
+    /// <summary>「停止思考」按钮按下：中止在途 GLM 请求</summary>
+    public event System.Action StopRequested;
 
     public bool Visible { get; private set; }
 
     RectTransform canvasRt;
+    RectTransform stopRt;
     Text heardText, statusText;
     readonly List<GameObject> candRows = new List<GameObject>();
     readonly List<ChemCandidate> pendingCandidates = new List<ChemCandidate>();
@@ -27,6 +30,17 @@ public class ChemUIController : MonoBehaviour
     bool posSnapped;
 
     TouchScreenKeyboard keyboard;
+    float keyboardOpenAt;          // 本次打开键盘的时刻（area 兜底检测的宽限期）
+    bool keyboardCloseNotified;    // area 兜底只补发一次关闭事件
+    bool keyboardEverShown;        // 本次键盘曾真正出现（出现后的关闭一定是用户手动关，绝不可自动重开）
+    bool keyboardOpening;          // 打开请求已发出、等待真正唤起的过渡态（防 Update 里旧引用干扰）
+    int keyboardOpenRetries;       // 本次打开的重试次数（PICO 系统拒绝时自动重试）
+    float nextKeyboardRetryAt;     // 下次自动重试时刻
+    float lastKeyboardCloseAt = -999f; // 上次检测到键盘关闭的时刻（PICO 重开冷却保护）
+    float pendingOpenAt = -1f;     // 被推迟的打开请求时刻（冷却/退避到点执行；<0 无请求）
+
+    const int MaxKeyboardRetries = 5;          // PICO 冷却期较长，退避重试覆盖 ~6 秒
+    const float KeyboardReopenCooldown = 0.7f; // 手动关闭系统键盘后立刻重开会被系统静默拒绝
 #if UNITY_EDITOR
     bool editorManual;
     string editorText = "";
@@ -116,6 +130,27 @@ public class ChemUIController : MonoBehaviour
         cancelBtn = ChemUIWidgets.CreateButton(root, "✕ 取消", 28, new Vector2(132f, 72f),
             new Color(0.36f, 0.20f, 0.20f), () => Cancelled?.Invoke());
         cancelBtn.RT.anchoredPosition = new Vector2(216f, -88f);
+
+        BuildStopCanvas();
+    }
+
+    /// <summary>「停止思考」按钮画布：与确认卡片同位（思考期间卡片隐藏，位置空出）。
+    /// 标签用纯文字——内置字体缺 ⏹ 等符号字形，缺失字形会导致排版偏移不居中。</summary>
+    void BuildStopCanvas()
+    {
+        stopRt = ChemUIWidgets.CreateCanvas(transform, "StopThinkCanvas",
+            new Vector2(460f, 150f), 0.44f, panelOffset);
+        var btn = ChemUIWidgets.CreateButton(stopRt, "停 止 思 考", 38, new Vector2(440f, 130f),
+            new Color(0.45f, 0.14f, 0.14f), () => StopRequested?.Invoke());
+        btn.RT.anchoredPosition = Vector2.zero;
+        stopRt.gameObject.SetActive(false); // 仅思考期间显示（AIVoicePet.Update 驱动）
+    }
+
+    /// <summary>显示/隐藏「停止思考」按钮</summary>
+    public void ShowStop(bool show)
+    {
+        if (stopRt != null && stopRt.gameObject.activeSelf != show)
+            stopRt.gameObject.SetActive(show);
     }
 
     /// <summary>展示确认卡片。candidates 最多取 3 个；为空时提示手动输入/重说。</summary>
@@ -157,6 +192,8 @@ public class ChemUIController : MonoBehaviour
         Visible = false;
         canvasRt.gameObject.SetActive(false);
         keyboard = null;
+        keyboardOpening = false;
+        pendingOpenAt = -1f; // 卡片收起后不再补开键盘，避免幽灵弹出
 #if UNITY_EDITOR
         editorManual = false;
 #endif
@@ -173,9 +210,20 @@ public class ChemUIController : MonoBehaviour
 #if !UNITY_EDITOR
         if (TouchScreenKeyboard.isSupported)
         {
-            if (keyboard == null || keyboard.status != TouchScreenKeyboard.Status.Visible)
-                keyboard = TouchScreenKeyboard.Open("", TouchScreenKeyboardType.Default,
-                    false, false, false, false, "输入物质名或分子式，如：乙醇 / ethanol / C2H6O");
+            // PICO 上 keyboard 实例一旦创建就常驻内存，status 停在 Visible 不再更新；
+            // 先显式停用旧实例再丢弃引用。仅置空 C# 引用时 Unity/PICO 仍可能认为旧键盘
+            // 正在活动，导致下一次 Open 被静默忽略。
+            if (keyboard != null)
+                keyboard.active = false;
+            keyboard = null;
+            keyboardOpening = true;
+            keyboardOpenRetries = 0;
+            pendingOpenAt = -1f;
+            // 手动关闭系统键盘后 PICO 有冷却期：立刻重开会被系统静默拒绝（二次点按钮打不开的根因）
+            // → 推迟到冷却结束再打开
+            float wait = lastKeyboardCloseAt + KeyboardReopenCooldown - Time.time;
+            if (wait > 0f) pendingOpenAt = Time.time + wait;
+            else TryOpenKeyboard();
             return;
         }
         SetStatus("当前设备不支持系统键盘，请用语音 + 候选按钮");
@@ -183,6 +231,32 @@ public class ChemUIController : MonoBehaviour
         editorManual = true;
         editorText = "";
 #endif
+    }
+
+    /// <summary>实际执行 TouchScreenKeyboard.Open，PICO 系统拒绝时退避重试</summary>
+    void TryOpenKeyboard()
+    {
+#if !UNITY_EDITOR
+        pendingOpenAt = -1f;
+        keyboard = TouchScreenKeyboard.Open("", TouchScreenKeyboardType.Default,
+            false, false, false, false, "输入物质名或分子式，如：乙醇 / ethanol / C2H6O");
+        keyboardOpenAt = Time.time;
+        keyboardCloseNotified = false;
+        keyboardEverShown = false;
+        keyboardOpening = false;
+        // PICO 静默拒绝检测起点：Open 返回实例但 status 立即失败，或 area 一直为 0（未真正唤起）
+        nextKeyboardRetryAt = Time.time + 0.5f;
+#endif
+    }
+
+    /// <summary>键盘任一关闭路径的统一收尾（记录关闭时刻用于重开冷却）</summary>
+    void NotifyKeyboardClosed()
+    {
+        keyboard = null;
+        keyboardOpening = false;
+        pendingOpenAt = -1f;
+        keyboardOpenRetries = 0;
+        lastKeyboardCloseAt = Time.time;
     }
 
     void ClearCandidateRows()
@@ -202,20 +276,65 @@ public class ChemUIController : MonoBehaviour
 
     void Update()
     {
-        // 系统键盘结果轮询
-        if (keyboard != null)
+        // 被推迟的键盘打开请求到点执行（重开冷却 / 退避重试）
+        if (pendingOpenAt > 0f && Time.time >= pendingOpenAt)
         {
-            if (keyboard.status == TouchScreenKeyboard.Status.Done)
+            pendingOpenAt = -1f;
+            if (keyboardOpening) TryOpenKeyboard();
+        }
+
+        // 系统键盘结果轮询（keyboardOpening 期间跳过，避免旧引用覆盖新实例）
+        if (keyboard != null && !keyboardOpening)
+        {
+            var st = keyboard.status;
+            if (st == TouchScreenKeyboard.Status.Visible && TouchScreenKeyboard.area.height > 0)
+                keyboardEverShown = true;
+
+            // PICO 静默拒绝自动重试：仅当键盘从未真正出现时才重试——
+            // 出现过之后的关闭一定是用户手动关闭，自动重开会打断用户操作；
+            // 打开超过 2 秒仍报 Visible 视为已成功（防止 PICO area 不上报导致误重试）。
+            bool openRejected = st == TouchScreenKeyboard.Status.Canceled
+                                || st == TouchScreenKeyboard.Status.LostFocus
+                                || (st == TouchScreenKeyboard.Status.Visible
+                                    && TouchScreenKeyboard.area.height <= 0);
+            if (!keyboardEverShown
+                && Time.time - keyboardOpenAt < 2f
+                && keyboardOpenRetries < MaxKeyboardRetries
+                && Time.time >= nextKeyboardRetryAt
+                && openRejected)
+            {
+                keyboardOpenRetries++;
+                Debug.Log($"[ChemUI] 键盘未唤起，退避重试 {keyboardOpenRetries}/{MaxKeyboardRetries}");
+                keyboard = null;
+                keyboardOpening = true;
+                // 退避间隔逐步拉长（1.0/1.4/1.8/2.2/2.6s），覆盖 PICO 重开冷却窗口
+                pendingOpenAt = Time.time + 0.6f + 0.4f * keyboardOpenRetries;
+                nextKeyboardRetryAt = pendingOpenAt;
+                return;
+            }
+
+            if (st == TouchScreenKeyboard.Status.Done)
             {
                 var t = keyboard.text;
-                keyboard = null;
+                NotifyKeyboardClosed();
                 KeyboardClosed?.Invoke(true);
                 if (!string.IsNullOrWhiteSpace(t)) ManualSubmitted?.Invoke(t.Trim());
             }
-            else if (keyboard.status == TouchScreenKeyboard.Status.Canceled
-                     || keyboard.status == TouchScreenKeyboard.Status.LostFocus)
+            else if (st == TouchScreenKeyboard.Status.Canceled
+                     || st == TouchScreenKeyboard.Status.LostFocus)
             {
-                keyboard = null;
+                NotifyKeyboardClosed();
+                KeyboardClosed?.Invoke(false);
+            }
+            else if (st == TouchScreenKeyboard.Status.Visible
+                     && !keyboardCloseNotified
+                     && Time.time - keyboardOpenAt > 1.5f
+                     && TouchScreenKeyboard.area.height <= 0)
+            {
+                // PICO 兜底：status 停留 Visible 但键盘实际已收回（area 归零）→ 补发关闭事件，
+                // 让上层恢复麦克风/录音；引用保留以防 status 后续再变 Done（提交仍可送达）
+                keyboardCloseNotified = true;
+                lastKeyboardCloseAt = Time.time;
                 KeyboardClosed?.Invoke(false);
             }
         }
@@ -242,19 +361,32 @@ public class ChemUIController : MonoBehaviour
 
     void LateUpdate()
     {
-        if (canvasRt == null || !canvasRt.gameObject.activeSelf) return;
-        if (followUser)
+        if (canvasRt != null && canvasRt.gameObject.activeSelf)
         {
-            UIFollow.Drive(canvasRt, ref posSnapped, -1f, followDistance, forwardBias, lateralBias, followHeight);
+            if (followUser)
+            {
+                UIFollow.Drive(canvasRt, ref posSnapped, -1f, followDistance, forwardBias, lateralBias, followHeight);
+            }
+            else
+            {
+                // 始终面向主相机（与 PetStatusUI 同步策略）
+                var cam = Camera.main;
+                if (cam != null)
+                {
+                    Vector3 toCam = cam.transform.position - canvasRt.position;
+                    canvasRt.rotation = Quaternion.LookRotation(-toCam.normalized, Vector3.up);
+                }
+            }
         }
-        else
+
+        // 停止按钮同样面向用户
+        if (stopRt != null && stopRt.gameObject.activeSelf)
         {
-            // 始终面向主相机（与 PetStatusUI 同步策略）
             var cam = Camera.main;
             if (cam != null)
             {
-                Vector3 toCam = cam.transform.position - canvasRt.position;
-                canvasRt.rotation = Quaternion.LookRotation(-toCam.normalized, Vector3.up);
+                Vector3 toCam = cam.transform.position - stopRt.position;
+                stopRt.rotation = Quaternion.LookRotation(-toCam.normalized, Vector3.up);
             }
         }
     }
