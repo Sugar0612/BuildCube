@@ -32,8 +32,10 @@ public class AIVoicePet : MonoBehaviour
     public bool enableTTS = true;
 
     [Header("GLM 大模型")]
-    [Tooltip("GLM 模型名")]
+    [Tooltip("GLM 模型名（候选解析与反应分析）")]
     public string glmModel = "glm-5.3-flash";
+    [Tooltip("结构估算专用模型（建议 glm-5.2：可关闭思考，坐标生成 ~20s；5.3 系列估算实测 3 分钟起）")]
+    public string estimateModel = "glm-5.2";
     [Tooltip("智谱开放平台 API Key（open.bigmodel.cn）。留空则启动时从 Assets/StreamingAssets/glm_key.txt 读取（该文件已 gitignore，不会上传）")]
     public string glmApiKey = "";
 
@@ -547,7 +549,8 @@ public class AIVoicePet : MonoBehaviour
     {
         try
         {
-            return await ChemistryLLM.ResolveAsync(cand, apiKey, glmModel, s => { if (ui != null) ui.SetHint(s); });
+            return await ChemistryLLM.ResolveAsync(cand, apiKey, glmModel, estimateModel,
+                s => { if (ui != null) ui.SetHint(s); });
         }
         catch (Exception e)
         {

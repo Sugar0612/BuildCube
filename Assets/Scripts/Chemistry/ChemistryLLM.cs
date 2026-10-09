@@ -59,8 +59,10 @@ public static class ChemistryLLM
         "你是分子三维结构估算模块。为指定化学物质估算球棍模型数据。\n" +
         "只输出json对象：{\"atoms\":[{\"e\":\"C\",\"x\":0.00,\"y\":0.00,\"z\":0.00}],\"bonds\":[{\"a\":1,\"b\":2,\"t\":1}]}\n" +
         "规则：\n" +
-        "- 坐标单位为埃；按 VSEPR 构型给出合理 3D 坐标（键长=共价半径之和，键角按杂化类型：sp3≈109.5°、sp2≈120°、sp≈180°）。\n" +
+        "- 坐标单位为埃，数值必须是数字。按 VSEPR 构型给合理 3D 坐标（键长=共价半径之和，键角按杂化：sp3≈109.5°、sp2≈120°、sp≈180°）。\n" +
         "- 所有氢原子必须列出。bonds 的 a、b 为 atoms 序号（从1开始），t 为键级 1/2/3。\n" +
+        "- 聚合物（名称含聚字或分子式含n）只生成代表链段：约 5~6 个重复单元，两端用氢原子封端，总原子数 30~70。\n" +
+        "- 一般物质总原子数≤70。坐标必须在三维空间充分展开，禁止所有原子挤在同一点或一条直线上。\n" +
         "- 禁止输出解释或代码块标记。";
 
     const string ReactPrompt =
@@ -220,9 +222,12 @@ public static class ChemistryLLM
 
     /// <summary>
     /// 三级解析：本地缓存 → PubChem（3D SDF，缺失降 2D）→ GLM 估算兜底。
+    /// estimateModel 单独指定（建议 glm-5.2：支持关闭思考，坐标生成 20s 内返回；
+    /// 5.3 系列思维链过长，聚合物估算实测 3 分钟起）。
     /// 返回 null 表示全部失败。status：可选的过程文本回调（主线程）。
     /// </summary>
     public static async Task<Molecule> ResolveAsync(ChemCandidate c, string apiKey, string model,
+                                                    string estimateModel = null,
                                                     Action<string> status = null)
     {
         if (c == null) return null;
@@ -259,7 +264,7 @@ public static class ChemistryLLM
 
         // 3) GLM 估算兜底（结构未经验证，展示时必须标注）
         status?.Invoke("数据库下载超时，转 AI 估算结构…");
-        return await EstimateStructureAsync(apiKey, model, c);
+        return await EstimateStructureAsync(apiKey, string.IsNullOrEmpty(estimateModel) ? model : estimateModel, c);
     }
 
     /// <summary>GLM 估算分子 3D 结构（兜底路径，source=GLM）</summary>
@@ -271,7 +276,7 @@ public static class ChemistryLLM
         try
         {
             reply = await LLMClient.AskRawAsync(apiKey, EstimatePrompt,
-                $"物质：{c.nameEn}（{c.nameZh}）  分子式：{c.formula}", model, onProgress, 6000, 0.2);
+                $"物质：{c.nameEn}（{c.nameZh}）  分子式：{c.formula}", model, onProgress, 10000, 0.2);
         }
         catch (Exception e)
         {
@@ -283,9 +288,12 @@ public static class ChemistryLLM
         var ja = root?["atoms"] as JSONArray;
         if (ja == null || ja.Count == 0) return null;
 
+        // 聚合物：估算的是代表链段而非完整分子，名称标注「链段」提示用户
+        bool isPolymer = (c.nameZh != null && c.nameZh.Contains("聚"))
+                         || (c.formula != null && c.formula.Contains("n"));
         var mol = new Molecule
         {
-            nameZh = c.nameZh,
+            nameZh = isPolymer && !string.IsNullOrEmpty(c.nameZh) ? c.nameZh + "·链段" : c.nameZh,
             nameEn = c.nameEn,
             formula = c.formula,
             mw = c.mw,
@@ -339,7 +347,7 @@ public static class ChemistryLLM
         string reply = null;
         try
         {
-            reply = await LLMClient.AskRawAsync(apiKey, ReactPrompt, sb.ToString(), model, onProgress, 6000, 0.1);
+            reply = await LLMClient.AskRawAsync(apiKey, ReactPrompt, sb.ToString(), model, onProgress, 8000, 0.1);
         }
         catch (Exception e)
         {
