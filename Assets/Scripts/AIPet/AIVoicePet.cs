@@ -321,8 +321,15 @@ public class AIVoicePet : MonoBehaviour
 
         if (string.IsNullOrWhiteSpace(text)) return;
 
-        // 云端模式下 Vosk 只跑唤醒词语法，不会产出命令文本
         string norm = Normalize(text);
+
+        // 云端模式下 Vosk 只负责唤醒词：唤醒语法尾部带 [unk] 通配，任何非唤醒词语音
+        // 都会被 Vosk 先回一条垃圾文本——它比云端识别快，会抢先触发解析并把 aiBusy 置位，
+        // 导致真正的云端结果被丢弃（表现为"说什么都识别不到"）。这里只放行唤醒词。
+        if (useCloudSTT && !IsWake(norm)) return;
+        // 本地模式：纯 [unk] 垃圾也丢弃
+        if (norm.Length == 0 || norm == "unk") return;
+
         if (ui != null) ui.SetHeard(text);
         HandleText(text, norm, confidence);
     }

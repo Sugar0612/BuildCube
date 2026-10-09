@@ -11,7 +11,8 @@ using UnityEngine.UI;
 /// </summary>
 public class MoleculeTray : MonoBehaviour
 {
-    public const int MaxSlots = 4;
+    /// <summary>反应物槽位上限（面板 2 列 × 4 行；与 EquationBench.ReactantSlots 保持一致）</summary>
+    public const int MaxSlots = 8;
 
     public event System.Action AddRequested;
     /// <summary>请求键盘输入（右侧面板的「键盘输入」按钮）</summary>
@@ -160,22 +161,24 @@ public class MoleculeTray : MonoBehaviour
         title.rectTransform.anchoredPosition = new Vector2(0f, 430f);
         title.rectTransform.sizeDelta = new Vector2(600f, 52f);
 
-        // 4 个反应物槽位行（渐进显示：行 GameObject 由 visibleRows 控制）
+        // 8 个反应物槽位：2 列 × 4 行网格（渐进显示：左列 1-4，右列 5-8）
         for (int i = 0; i < MaxSlots; i++)
         {
+            int gridRow = i % 4, col = i / 4;
             var idx = i;
-            var row = new GameObject($"Row{i}", typeof(RectTransform));
-            row.transform.SetParent(root, false);
-            var rrt = row.GetComponent<RectTransform>();
-            rrt.sizeDelta = new Vector2(640f, 56f);
-            rrt.anchoredPosition = new Vector2(0f, 364f - i * 62f);
+            var cell = new GameObject($"Cell{i}", typeof(RectTransform));
+            cell.transform.SetParent(root, false);
+            var crt = cell.GetComponent<RectTransform>();
+            crt.sizeDelta = new Vector2(318f, 56f);
+            crt.anchoredPosition = new Vector2(col == 0 ? -166f : 166f, 364f - gridRow * 62f);
 
-            var slot = new Slot { row = row };
-            slot.label = ChemUIWidgets.CreateText(row.transform, "Label", 26, TextAnchor.MiddleLeft);
-            ChemUIWidgets.Stretch(slot.label.rectTransform, 6f, 3f, 64f, 3f);
-            slot.removeBtn = ChemUIWidgets.CreateButton(row.transform, "×", 30, new Vector2(52f, 48f),
+            var slot = new Slot { row = cell };
+            slot.label = ChemUIWidgets.CreateText(cell.transform, "Label", 22, TextAnchor.MiddleLeft);
+            ChemUIWidgets.Stretch(slot.label.rectTransform, 6f, 3f, 58f, 3f);
+            slot.label.verticalOverflow = VerticalWrapMode.Truncate; // 名称过长截断，不溢出格子
+            slot.removeBtn = ChemUIWidgets.CreateButton(cell.transform, "×", 28, new Vector2(48f, 46f),
                 new Color(0.42f, 0.16f, 0.16f), () => RemoveAt(idx));
-            slot.removeBtn.RT.anchoredPosition = new Vector2(294f, 0f);
+            slot.removeBtn.RT.anchoredPosition = new Vector2(132f, 0f);
             slots.Add(slot);
         }
 
@@ -210,7 +213,7 @@ public class MoleculeTray : MonoBehaviour
 
         hintText = ChemUIWidgets.CreateText(root, "Hint", 20, TextAnchor.UpperLeft,
             new Color(0.65f, 0.85f, 0.95f, 0.8f));
-        hintText.text = "说「构建 某分子」或点「键盘输入」上台；\n集齐 2 种以上反应物后点「开始反应」";
+        hintText.text = "说「构建 某分子」或点「键盘输入」上台（最多 8 个）；\n集齐 2 种以上反应物后点「开始反应」";
         hintText.rectTransform.anchoredPosition = new Vector2(0f, -428f);
         hintText.rectTransform.sizeDelta = new Vector2(620f, 76f);
 

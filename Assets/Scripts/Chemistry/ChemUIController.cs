@@ -218,6 +218,7 @@ public class ChemUIController : MonoBehaviour
             keyboard = null;
             keyboardOpening = true;
             keyboardOpenRetries = 0;
+            keyboardEverShown = false; // 全新请求：重新收集"键盘真正出现"的证据
             pendingOpenAt = -1f;
             // 手动关闭系统键盘后 PICO 有冷却期：立刻重开会被系统静默拒绝（二次点按钮打不开的根因）
             // → 推迟到冷却结束再打开
@@ -242,7 +243,8 @@ public class ChemUIController : MonoBehaviour
             false, false, false, false, "输入物质名或分子式，如：乙醇 / ethanol / C2H6O");
         keyboardOpenAt = Time.time;
         keyboardCloseNotified = false;
-        keyboardEverShown = false;
+        // keyboardEverShown 跨重试保持粘性：重试只发生在键盘从未真正出现时，
+        // 一旦出现过（area 上报或已有输入）本次请求绝不再自动重开
         keyboardOpening = false;
         // PICO 静默拒绝检测起点：Open 返回实例但 status 立即失败，或 area 一直为 0（未真正唤起）
         nextKeyboardRetryAt = Time.time + 0.5f;
@@ -287,7 +289,10 @@ public class ChemUIController : MonoBehaviour
         if (keyboard != null && !keyboardOpening)
         {
             var st = keyboard.status;
-            if (st == TouchScreenKeyboard.Status.Visible && TouchScreenKeyboard.area.height > 0)
+            // 键盘真正在用的两类铁证：area 正常上报，或用户已经打了字。
+            // 打字中若误判为"静默拒绝"而自动重开，新空键盘会直接清空用户输入——绝不允许。
+            if (st == TouchScreenKeyboard.Status.Visible
+                && (TouchScreenKeyboard.area.height > 0 || !string.IsNullOrEmpty(keyboard.text)))
                 keyboardEverShown = true;
 
             // PICO 静默拒绝自动重试：仅当键盘从未真正出现时才重试——

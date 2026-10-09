@@ -12,15 +12,17 @@ using UnityEngine;
 /// </summary>
 public class EquationBench : MonoBehaviour
 {
-    public const int ReactantSlots = 4;  // 反应物槽（与 MoleculeTray.MaxSlots 一致）
+    public const int ReactantSlots = 8;  // 反应物槽（与 MoleculeTray.MaxSlots 保持一致，2 列网格）
     public const int ProductSlots = 4;   // 产物槽
     public const int TotalSlots = ReactantSlots + ProductSlots;
 
     [Header("舞台布局")]
     [Tooltip("舞台相对智能球中心的高度（米）：高于状态面板与名字标签，杜绝重叠")]
     public float benchHeight = 0.82f;
-    [Tooltip("相邻插槽默认间距（米）")]
+    [Tooltip("相邻插槽默认间距（米）：框少时用此值")]
     public float slotSpacing = 0.56f;
+    [Tooltip("反应物区最大总宽（米）：框多时自动压缩间距，保证不出视野")]
+    public float maxRowWidth = 3.4f;
     [Tooltip("相框尺寸（宽×高，米）")]
     public Vector2 frameSize = new Vector2(0.40f, 0.46f);
     [Tooltip("边框条粗细（米）")]
@@ -56,6 +58,7 @@ public class EquationBench : MonoBehaviour
 
     int dragIndex = -1;
     UIRayPointer dragSource;
+    float lastSpR, lastSpP; // 最近一次 Relayout 的自适应间距（UpdateMarkers 复用）
 
     void Awake()
     {
@@ -226,12 +229,23 @@ public class EquationBench : MonoBehaviour
         }
     }
 
+    /// <summary>自适应间距：框多时压缩间距，保证整排不超出 maxRowWidth</summary>
+    float AdaptiveSpacing(int count, float maxWidth)
+    {
+        if (count <= 1) return slotSpacing;
+        return Mathf.Clamp((maxWidth - frameSize.x) / (count - 1), 0.34f, slotSpacing);
+    }
+
     /// <summary>按当前形态重新排布全部相框与徽章（居中：反应物 [+] … [=] 产物）</summary>
     void Relayout()
     {
         float fw = frameSize.x;
-        float wR = (visibleReactants - 1) * slotSpacing + fw;
-        float wP = visibleProducts > 0 ? (visibleProducts - 1) * slotSpacing + fw : 0f;
+        float spR = AdaptiveSpacing(visibleReactants, maxRowWidth);
+        float spP = AdaptiveSpacing(visibleProducts, 2.4f);
+        lastSpR = spR; // UpdateMarkers 的「=」定位复用同一间距，避免压缩时错位
+        lastSpP = spP;
+        float wR = (visibleReactants - 1) * spR + fw;
+        float wP = visibleProducts > 0 ? (visibleProducts - 1) * spP + fw : 0f;
         float eqW = showEquals ? equalsGap : 0f;
         float total = wR + eqW + wP;
         float x = -total * 0.5f + fw * 0.5f;
@@ -243,11 +257,10 @@ public class EquationBench : MonoBehaviour
             if (vis)
             {
                 anchors[i].localPosition = new Vector3(x, benchHeight, 0f);
-                x += slotSpacing;
+                x += spR;
             }
         }
         float rightEdgeR = -total * 0.5f + wR;
-        float eqX = rightEdgeR + eqW * 0.5f;
         float xP = rightEdgeR + eqW + fw * 0.5f;
         for (int j = 0; j < ProductSlots; j++)
         {
@@ -256,7 +269,7 @@ public class EquationBench : MonoBehaviour
             if (vis)
             {
                 anchors[ReactantSlots + j].localPosition = new Vector3(xP, benchHeight, 0f);
-                xP += slotSpacing;
+                xP += spP;
             }
         }
 
@@ -333,8 +346,8 @@ public class EquationBench : MonoBehaviour
         // 「=」：位于反应物区与产物区之间（无产物时贴在最后一个反应物框右侧）
         if (equalMark != null && equalMark.gameObject.activeSelf)
         {
-            float wR = (visibleReactants - 1) * slotSpacing + frameSize.x;
-            float wP = visibleProducts > 0 ? (visibleProducts - 1) * slotSpacing + frameSize.x : 0f;
+            float wR = (visibleReactants - 1) * lastSpR + frameSize.x;
+            float wP = visibleProducts > 0 ? (visibleProducts - 1) * lastSpP + frameSize.x : 0f;
             float total = wR + equalsGap + wP;
             float eqX = -total * 0.5f + wR + equalsGap * 0.5f;
             equalMark.localPosition = new Vector3(eqX, benchHeight, -0.02f);

@@ -22,8 +22,8 @@ public class HoloTray : MonoBehaviour
     public float atomRadiusFactor = 0.6f;
     [Tooltip("全息粒子尺寸（米）")]
     public float particleSize = 0.010f;
-    [Tooltip("粒子池上限")]
-    public int maxParticles = 6000;
+    [Tooltip("粒子池上限（12 槽全满时按预算自动摊派）")]
+    public int maxParticles = 12000;
 
     [Header("动画")]
     [Tooltip("自转角速度基准（度/秒，逐个随机方向与快慢）")]
@@ -39,8 +39,8 @@ public class HoloTray : MonoBehaviour
     [Tooltip("手部推开的最大位移（米）")]
     public float handPush = 0.05f;
 
-    /// <summary>总槽位：前 4 个为反应物（MoleculeTray.MaxSlots），后 4 个为反应产物</summary>
-    public const int TotalSlots = 8;
+    /// <summary>总槽位：8 反应物（MoleculeTray.MaxSlots）+ 4 产物</summary>
+    public const int TotalSlots = MoleculeTray.MaxSlots + 4;
 
     /// <summary>单个全息分子：粒子记录 + 独立动画状态</summary>
     class Holo
