@@ -239,7 +239,7 @@ public static class ChemistryLLM
         if (c.cid <= 0) await ValidateAsync(c);
         if (c.cid > 0)
         {
-            status?.Invoke("正在下载 PubChem 3D 结构…");
+            status?.Invoke("正在下载 PubChem 3D 结构…（国内网络可能较慢）");
             var sdf = await PubChemClient.FetchSdf(c.cid);
             var mol = Molecule.ParseSdf(sdf);
             if (mol != null && mol.HasValidGeometry())
@@ -254,12 +254,11 @@ public static class ChemistryLLM
                 status?.Invoke($"PubChem 校验成功：{mol.DisplayName()}（{mol.atoms.Count} 原子 {mol.bonds.Count} 键）");
                 return mol;
             }
-            if (mol != null)
-                Debug.LogWarning($"[Chem] PubChem 返回退化几何({c.DisplayName()})，转 GLM 估算");
+            Debug.LogWarning($"[Chem] PubChem 下载失败或退化({c.DisplayName()})，转 GLM 估算兜底");
         }
 
         // 3) GLM 估算兜底（结构未经验证，展示时必须标注）
-        status?.Invoke("数据库未收录或下载失败，GLM 估算结构中…");
+        status?.Invoke("数据库下载超时，转 AI 估算结构…");
         return await EstimateStructureAsync(apiKey, model, c);
     }
 

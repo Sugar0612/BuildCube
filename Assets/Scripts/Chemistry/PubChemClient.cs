@@ -22,7 +22,9 @@ public class PubChemHit
 public static class PubChemClient
 {
     const string Base = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound";
-    const int TimeoutSec = 20;
+    // 头显网络访问 PubChem（美国 NCBI）普遍不稳定（实测丢包/高延迟）：
+    // 超时取短值，失败后由 ChemistryLLM 快速转 GLM 估算兜底，避免用户干等 40 秒
+    const int TimeoutSec = 8;
 
     /// <summary>按英文名精确查询，未命中（404）返回 null</summary>
     public static async Task<PubChemHit> LookupName(string name)
