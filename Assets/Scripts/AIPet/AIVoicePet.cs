@@ -264,7 +264,7 @@ public class AIVoicePet : MonoBehaviour
         SetGrammarMode(true);
         if (ui != null)
         {
-            ui.SetStatus($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}（待机中）");
+            ui.SetStatus($"列表 {tray.Count} 个分子（待机中）");
             ui.SetHeard("");
             ui.SetHint("说「你好」继续添加，或点面板按钮操作");
         }
@@ -456,13 +456,6 @@ public class AIVoicePet : MonoBehaviour
         aiBusy = true;
         userAbort = false;
         EndListenWindow();
-        if (tray.IsFull)
-        {
-            tts?.SpeakText("展示台已满，请先清空或移除一个分子");
-            if (ui != null) ui.SetHint($"展示台已满 {tray.Count}/{MoleculeTray.MaxSlots}；点面板「清空展示台」或行尾 × 移除");
-            GoIdle();
-            return;
-        }
 
         SetMic(false);
         chemUI.Hide();
@@ -527,16 +520,11 @@ public class AIVoicePet : MonoBehaviour
         {
             if (userAbort) { AbortToListen(); return; } // 用户中止：静默退出
             tts?.SpeakText("没有找到该物质的结构");
-            BackToListen("结构获取失败", $"展示台保留 {tray.Count}/{MoleculeTray.MaxSlots} 个分子；请换个名称重试");
+            BackToListen("结构获取失败", $"列表保留 {tray.Count} 个分子；请换个名称重试");
             return;
         }
 
-        if (!tray.TryAdd(mol))
-        {
-            tts?.SpeakText("展示台已满，请先清空或移除一个分子");
-            GoIdle();
-            return;
-        }
+        tray.TryAdd(mol); // 无上限列表，必定成功
         // TryAdd 触发 TrayChanged → 全息台/舞台已同步；智能球回归待机球体
         Pet.SetState(PetState.Idle);
 
@@ -548,7 +536,9 @@ public class AIVoicePet : MonoBehaviour
         if (ui != null)
         {
             ui.SetStatus($"已上台：{mol.DisplayName()} {mol.formula}{tag} ✓");
-            ui.SetHint($"展示台 {tray.Count}/{MoleculeTray.MaxSlots}；已回待机，说「你好」继续添加");
+            var more = tray.Count > EquationBench.ReactantSlots
+                ? $"（3D 舞台显示前 {EquationBench.ReactantSlots} 个）" : "";
+            ui.SetHint($"列表 {tray.Count} 个分子{more}；已回待机，说「你好」继续添加");
         }
     }
 
@@ -588,7 +578,7 @@ public class AIVoicePet : MonoBehaviour
         {
             if (listenWindow) listenDeadline = Time.time + listenTimeout;
             if (!aiBusy && ui != null)
-                ui.SetStatus($"展示台更新：{tray.Count}/{MoleculeTray.MaxSlots} 个分子");
+                ui.SetStatus($"列表更新：{tray.Count} 个分子");
         }
         else
         {
@@ -810,7 +800,7 @@ public class AIVoicePet : MonoBehaviour
         ui.SetStatus("待机中");
         ui.SetHeard("");
         ui.SetHint(tray.Count > 0
-            ? $"展示台保留 {tray.Count}/{MoleculeTray.MaxSlots} 个分子；说「你好」继续添加"
+            ? $"列表保留 {tray.Count} 个分子；说「你好」继续添加"
             : "说“你好”唤醒我");
     }
 

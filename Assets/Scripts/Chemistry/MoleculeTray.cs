@@ -3,23 +3,20 @@ using UnityEngine;
 using UnityEngine.UI;
 
 /// <summary>
-/// 分子列表面板（跟随用户右手斜前方）：
-/// 槽位渐进出现——一开始只有 1 行，分子填入后才出现下一行（最多 4 个反应物）。
-/// 按钮组：＋添加分子 / ⌨键盘输入 / ⚗开始反应（≥2 个反应物可用）/ 清空展示台。
-/// 底部展示反应结果（配平方程式 / 类型 / 条件 / 可行性说明 + 免责声明）。
-/// 手柄射线操作。
+/// 分子列表面板（跟随用户右手斜前方固定）：无限长度的可滚动列表——
+/// 分子数量不设上限，一直添加一直追加；列表区支持手柄按住拖动滚动与 ▲/▼ 按钮翻动，
+/// 新分子上台自动滚到底部。按钮组：＋添加分子 / ⌨键盘输入 / ⚗开始反应 / 清空。
+/// 3D 方程式舞台最多呈现前 EquationBench.ReactantSlots 个反应物（相框排布上限），
+/// 列表与舞台数据同源；反应分析把全部反应物交给 GLM。
 /// </summary>
 public class MoleculeTray : MonoBehaviour
 {
-    /// <summary>反应物槽位上限（面板 2 列 × 4 行；与 EquationBench.ReactantSlots 保持一致）</summary>
-    public const int MaxSlots = 8;
-
     public event System.Action AddRequested;
     /// <summary>请求键盘输入（右侧面板的「键盘输入」按钮）</summary>
     public event System.Action KeyboardInputRequested;
     /// <summary>请求开始反应（≥2 个反应物时可用）</summary>
     public event System.Action ReactRequested;
-    /// <summary>台上有分子被移除或清空后触发（3D 场景需要同步重建/清场）</summary>
+    /// <summary>列表增删/清空后触发（3D 场景同步）</summary>
     public event System.Action TrayChanged;
 
     [Header("面板位置")]
@@ -29,108 +26,86 @@ public class MoleculeTray : MonoBehaviour
     public Vector3 panelOffset = new Vector3(1.08f, 0f, 0f);
     [Tooltip("跟随模式：面板与用户的距离（米）")]
     public float followDistance = 1.05f;
-    [Tooltip("跟随方向的向前权重（越大越靠正前方，越容易看全）")]
+    [Tooltip("跟随方向的向前权重")]
     public float forwardBias = 0.9f;
     [Tooltip("跟随方向的侧向权重")]
     public float lateralBias = 0.45f;
     [Tooltip("跟随模式：相对视线的高度偏移（米）")]
     public float followHeight = -0.1f;
 
-    class Slot
-    {
-        public Molecule mol;
-        public Text label;
-        public ChemButton removeBtn;
-        public GameObject row; // label+按钮共同的显示开关（渐进行）
-    }
+    /// <summary>列表数据（无上限）</summary>
+    readonly List<Molecule> molecules = new List<Molecule>();
 
-    readonly List<Slot> slots = new List<Slot>();
     RectTransform canvasRt;
-    Text hintText;
-    Text resultText;
+    RectTransform viewportRt, contentRt;
+    Text countText, hintText, resultText;
     ChemButton reactBtn;
     bool posSnapped;
-    int visibleRows = 1; // 渐进：初始只显示 1 行
+
+    // 滚动状态
+    float scrollY;
+    bool listDragging;
+    Vector3 dragStartPos;
+    float dragStartScroll;
+    UIRayPointer dragPointer;
 
     const float CanvasW = 680f, CanvasH = 940f;
     const float WidthMeters = 0.6f;
+    const float RowH = 62f, RowGap = 6f;     // 行高与行距（画布单位）
+    const float ViewportH = 400f;            // 列表可视高度
 
-    void Awake()
-    {
-        BuildCanvas();
-        if (followUser) canvasRt.SetParent(null); // 跟随模式：脱离宠物世界空间驱动
-        else canvasRt.localPosition = panelOffset; // 固定模式：挂在宠物右侧
-    }
+    public int Count => molecules.Count;
 
-    public int Count
-    {
-        get
-        {
-            int n = 0;
-            foreach (var s in slots) if (s.mol != null) n++;
-            return n;
-        }
-    }
+    /// <summary>当前全部分子（按加入顺序）</summary>
+    public List<Molecule> Molecules() => new List<Molecule>(molecules);
 
-    public bool IsFull => Count >= MaxSlots;
+    /// <summary>按顺序返回分子数组（空位概念已取消；3D 舞台自行截取前 N 个）</summary>
+    public Molecule[] MoleculesBySlot() => molecules.ToArray();
 
-    /// <summary>当前已上台的分子（按槽位顺序，跳过空位）</summary>
-    public List<Molecule> Molecules()
-    {
-        var list = new List<Molecule>();
-        foreach (var s in slots) if (s.mol != null) list.Add(s.mol);
-        return list;
-    }
-
-    /// <summary>按槽位索引返回分子数组（空位为 null；索引与方程式舞台反应物插槽一致）</summary>
-    public Molecule[] MoleculesBySlot()
-    {
-        var arr = new Molecule[slots.Count];
-        for (int i = 0; i < slots.Count; i++)
-            arr[i] = slots[i].mol;
-        return arr;
-    }
-
-    /// <summary>当前反应物转为候选列表（GLM 反应分析请求用）</summary>
+    /// <summary>全部反应物转为候选列表（GLM 反应分析请求用）</summary>
     public List<ChemCandidate> Candidates()
     {
         var list = new List<ChemCandidate>();
-        foreach (var s in slots)
-            if (s.mol != null)
-                list.Add(new ChemCandidate
-                {
-                    nameZh = s.mol.nameZh,
-                    nameEn = s.mol.nameEn,
-                    formula = s.mol.formula,
-                    cid = s.mol.cid,
-                    mw = s.mol.mw,
-                    validated = true,
-                });
+        foreach (var m in molecules)
+            list.Add(new ChemCandidate
+            {
+                nameZh = m.nameZh,
+                nameEn = m.nameEn,
+                formula = m.formula,
+                cid = m.cid,
+                mw = m.mw,
+                validated = true,
+            });
         return list;
     }
 
-    /// <summary>加入分子到第一个空位；满员返回 false（触发 TrayChanged 同步全息台）</summary>
+    /// <summary>追加分子（无上限；触发 TrayChanged 同步 3D 舞台）</summary>
     public bool TryAdd(Molecule mol)
     {
         if (mol == null) return false;
-        foreach (var s in slots)
-        {
-            if (s.mol != null) continue;
-            s.mol = mol;
-            RefreshRows();
-            TrayChanged?.Invoke();
-            return true;
-        }
-        return false;
+        molecules.Add(mol);
+        RebuildRows();
+        ScrollToBottom();
+        TrayChanged?.Invoke();
+        return true;
     }
 
     public void Clear()
     {
-        bool had = Count > 0;
-        foreach (var s in slots) s.mol = null;
+        bool had = molecules.Count > 0;
+        molecules.Clear();
         if (resultText != null) resultText.text = "";
-        RefreshRows();
+        scrollY = 0f;
+        RebuildRows();
         if (had) TrayChanged?.Invoke();
+    }
+
+    void RemoveAt(int i)
+    {
+        if (i < 0 || i >= molecules.Count) return;
+        molecules.RemoveAt(i);
+        RebuildRows();
+        TrayChanged?.Invoke();
     }
 
     /// <summary>展示反应分析结果（面板底部文字区）</summary>
@@ -145,8 +120,15 @@ public class MoleculeTray : MonoBehaviour
         if (!string.IsNullOrEmpty(r.energy)) meta.Add(r.energy);
         if (meta.Count > 0) sb.AppendLine(string.Join(" | ", meta.ToArray()));
         if (!string.IsNullOrEmpty(r.note)) sb.AppendLine(r.note);
-        sb.Append("※ AI 定性估算，仅供实验前探索").AppendLine();
-        resultText.text = sb.ToString().TrimEnd();
+        sb.Append("※ AI 定性估算，仅供实验前探索");
+        resultText.text = sb.ToString();
+    }
+
+    void Awake()
+    {
+        BuildCanvas();
+        if (followUser) canvasRt.SetParent(null); // 跟随模式：脱离宠物世界空间驱动
+        else canvasRt.localPosition = panelOffset; // 固定模式：挂在宠物右侧
     }
 
     void BuildCanvas()
@@ -157,93 +139,199 @@ public class MoleculeTray : MonoBehaviour
 
         var title = ChemUIWidgets.CreateText(root, "Title", 32, TextAnchor.MiddleCenter,
             new Color(0.75f, 0.95f, 1f, 1f));
-        title.text = "分子展示台";
-        title.rectTransform.anchoredPosition = new Vector2(0f, 430f);
+        title.text = "分子列表";
+        title.rectTransform.anchoredPosition = new Vector2(0f, 432f);
         title.rectTransform.sizeDelta = new Vector2(600f, 52f);
 
-        // 8 个反应物槽位：2 列 × 4 行网格（渐进显示：左列 1-4，右列 5-8）
-        for (int i = 0; i < MaxSlots; i++)
-        {
-            int gridRow = i % 4, col = i / 4;
-            var idx = i;
-            var cell = new GameObject($"Cell{i}", typeof(RectTransform));
-            cell.transform.SetParent(root, false);
-            var crt = cell.GetComponent<RectTransform>();
-            crt.sizeDelta = new Vector2(318f, 56f);
-            crt.anchoredPosition = new Vector2(col == 0 ? -166f : 166f, 364f - gridRow * 62f);
+        countText = ChemUIWidgets.CreateText(root, "Count", 24, TextAnchor.MiddleCenter,
+            new Color(0.7f, 0.95f, 1f, 0.9f));
+        countText.text = "已上台 0 个分子（无上限）";
+        countText.rectTransform.anchoredPosition = new Vector2(0f, 394f);
+        countText.rectTransform.sizeDelta = new Vector2(600f, 30f);
 
-            var slot = new Slot { row = cell };
-            slot.label = ChemUIWidgets.CreateText(cell.transform, "Label", 22, TextAnchor.MiddleLeft);
-            ChemUIWidgets.Stretch(slot.label.rectTransform, 6f, 3f, 58f, 3f);
-            slot.label.verticalOverflow = VerticalWrapMode.Truncate; // 名称过长截断，不溢出格子
-            slot.removeBtn = ChemUIWidgets.CreateButton(cell.transform, "×", 28, new Vector2(48f, 46f),
-                new Color(0.42f, 0.16f, 0.16f), () => RemoveAt(idx));
-            slot.removeBtn.RT.anchoredPosition = new Vector2(132f, 0f);
-            slots.Add(slot);
-        }
+        // ---- 滚动列表区：视口（RectMask2D 裁剪超出部分）+ 内容（动态行）----
+        var vpGo = new GameObject("ListViewport", typeof(RectTransform), typeof(RectMask2D), typeof(Image));
+        vpGo.transform.SetParent(root, false);
+        viewportRt = vpGo.GetComponent<RectTransform>();
+        viewportRt.sizeDelta = new Vector2(590f, ViewportH);
+        viewportRt.anchoredPosition = new Vector2(-28f, 172f);
+        var vpBg = vpGo.GetComponent<Image>();
+        vpBg.color = new Color(0.03f, 0.06f, 0.1f, 0.55f);
+        vpBg.raycastTarget = false;
+
+        var ctGo = new GameObject("ListContent", typeof(RectTransform));
+        ctGo.transform.SetParent(viewportRt, false);
+        contentRt = ctGo.GetComponent<RectTransform>();
+        contentRt.anchorMin = new Vector2(0f, 1f);
+        contentRt.anchorMax = new Vector2(1f, 1f);
+        contentRt.pivot = new Vector2(0.5f, 1f);
+        contentRt.anchoredPosition = Vector2.zero;
+        contentRt.sizeDelta = new Vector2(0f, 0f);
+
+        // ▲ / ▼ 滚动按钮（列表右缘）
+        var upBtn = ChemUIWidgets.CreateButton(root, "▲", 30, new Vector2(52f, 90f),
+            new Color(0.16f, 0.3f, 0.45f), () => Scroll(-3));
+        upBtn.RT.anchoredPosition = new Vector2(298f, 262f);
+        var downBtn = ChemUIWidgets.CreateButton(root, "▼", 30, new Vector2(52f, 90f),
+            new Color(0.16f, 0.3f, 0.45f), () => Scroll(3));
+        downBtn.RT.anchoredPosition = new Vector2(298f, 82f);
 
         // 按钮组 2×2：添加/键盘 + 反应/清空
-        var addBtn = ChemUIWidgets.CreateButton(root, "＋ 添加分子", 26, new Vector2(290f, 72f),
+        var addBtn = ChemUIWidgets.CreateButton(root, "＋ 添加分子", 26, new Vector2(290f, 66f),
             new Color(0.16f, 0.34f, 0.55f), () => AddRequested?.Invoke());
-        addBtn.RT.anchoredPosition = new Vector2(-162f, 66f);
+        addBtn.RT.anchoredPosition = new Vector2(-162f, -72f);
 
-        var kbBtn = ChemUIWidgets.CreateButton(root, "⌨ 键盘输入", 26, new Vector2(290f, 72f),
+        var kbBtn = ChemUIWidgets.CreateButton(root, "⌨ 键盘输入", 26, new Vector2(290f, 66f),
             new Color(0.30f, 0.22f, 0.48f), () => KeyboardInputRequested?.Invoke());
-        kbBtn.RT.anchoredPosition = new Vector2(162f, 66f);
+        kbBtn.RT.anchoredPosition = new Vector2(162f, -72f);
 
-        reactBtn = ChemUIWidgets.CreateButton(root, "⚗ 开始反应", 26, new Vector2(290f, 72f),
+        reactBtn = ChemUIWidgets.CreateButton(root, "⚗ 开始反应", 26, new Vector2(290f, 66f),
             new Color(0.13f, 0.42f, 0.26f), () => ReactRequested?.Invoke());
-        reactBtn.RT.anchoredPosition = new Vector2(-162f, -18f);
+        reactBtn.RT.anchoredPosition = new Vector2(-162f, -146f);
 
-        var clearBtn = ChemUIWidgets.CreateButton(root, "🗑 清空展示台", 26, new Vector2(290f, 72f),
+        var clearBtn = ChemUIWidgets.CreateButton(root, "🗑 清空列表", 26, new Vector2(290f, 66f),
             new Color(0.34f, 0.26f, 0.16f), Clear);
-        clearBtn.RT.anchoredPosition = new Vector2(162f, -18f);
+        clearBtn.RT.anchoredPosition = new Vector2(162f, -146f);
 
         // 反应结果区
-        var resultTitle = ChemUIWidgets.CreateText(root, "ResultTitle", 24, TextAnchor.MiddleLeft,
+        var resultTitle = ChemUIWidgets.CreateText(root, "ResultTitle", 22, TextAnchor.MiddleLeft,
             new Color(1f, 0.85f, 0.55f, 0.95f));
         resultTitle.text = "── 反应分析 ──";
-        resultTitle.rectTransform.anchoredPosition = new Vector2(0f, -96f);
-        resultTitle.rectTransform.sizeDelta = new Vector2(620f, 34f);
+        resultTitle.rectTransform.anchoredPosition = new Vector2(0f, -206f);
+        resultTitle.rectTransform.sizeDelta = new Vector2(620f, 30f);
 
-        resultText = ChemUIWidgets.CreateText(root, "Result", 23, TextAnchor.UpperLeft,
+        resultText = ChemUIWidgets.CreateText(root, "Result", 22, TextAnchor.UpperLeft,
             new Color(1f, 0.95f, 0.8f, 0.96f));
-        resultText.rectTransform.anchoredPosition = new Vector2(0f, -250f);
-        resultText.rectTransform.sizeDelta = new Vector2(630f, 290f);
+        resultText.rectTransform.anchoredPosition = new Vector2(0f, -300f);
+        resultText.rectTransform.sizeDelta = new Vector2(630f, 190f);
 
         hintText = ChemUIWidgets.CreateText(root, "Hint", 20, TextAnchor.UpperLeft,
             new Color(0.65f, 0.85f, 0.95f, 0.8f));
-        hintText.text = "说「构建 某分子」或点「键盘输入」上台（最多 8 个）；\n集齐 2 种以上反应物后点「开始反应」";
-        hintText.rectTransform.anchoredPosition = new Vector2(0f, -428f);
-        hintText.rectTransform.sizeDelta = new Vector2(620f, 76f);
+        hintText.text = "语音或键盘可无限添加分子（拖动列表 / ▲▼ 滚动）；\n集齐 2 种以上点「开始反应」";
+        hintText.rectTransform.anchoredPosition = new Vector2(0f, -432f);
+        hintText.rectTransform.sizeDelta = new Vector2(620f, 70f);
 
-        RefreshRows();
+        RebuildRows();
     }
 
-    void RemoveAt(int i)
-    {
-        if (i < 0 || i >= slots.Count) return;
-        if (slots[i].mol == null) return;
-        slots[i].mol = null;
-        RefreshRows();
-        TrayChanged?.Invoke();
-    }
+    // ---------------- 列表行 ----------------
 
-    void RefreshRows()
+    void RebuildRows()
     {
-        // 渐进行：显示 已填数量+1（待填下一行），上限 4；分子被移除则收缩
-        int want = Mathf.Clamp(Count + 1, 1, MaxSlots);
-        visibleRows = want;
-        for (int i = 0; i < slots.Count; i++)
+        // 清旧行（连同射线按钮注册）
+        for (int i = contentRt.childCount - 1; i >= 0; i--)
         {
-            var s = slots[i];
-            s.row.SetActive(i < visibleRows);
-            s.label.text = s.mol == null
-                ? $"{i + 1}.（待放入）"
-                : $"{i + 1}. {s.mol.DisplayName()}  {s.mol.formula}";
-            s.removeBtn.SetInteractable(s.mol != null);
+            var child = contentRt.GetChild(i);
+            for (int k = ChemRayRegistry.Targets.Count - 1; k >= 0; k--)
+                if (ChemRayRegistry.Targets[k] is ChemButton cb && cb.RT != null
+                    && (cb.RT == child || cb.RT.IsChildOf(child)))
+                    ChemRayRegistry.Unregister(cb);
+            Destroy(child.gameObject);
         }
-        if (reactBtn != null) reactBtn.SetInteractable(Count >= 2);
+
+        for (int i = 0; i < molecules.Count; i++)
+        {
+            var idx = i;
+            var m = molecules[i];
+            var row = new GameObject($"Row{i}", typeof(RectTransform));
+            row.transform.SetParent(contentRt, false);
+            var rt = row.GetComponent<RectTransform>();
+            rt.sizeDelta = new Vector2(570f, RowH);
+            rt.anchoredPosition = new Vector2(0f, -(RowH * 0.5f + i * (RowH + RowGap)));
+
+            var label = ChemUIWidgets.CreateText(row.transform, "Label", 22, TextAnchor.MiddleLeft);
+            ChemUIWidgets.Stretch(label.rectTransform, 8f, 3f, 60f, 3f);
+            label.verticalOverflow = VerticalWrapMode.Truncate;
+            label.text = $"{idx + 1}. {m.DisplayName()}  {m.formula}";
+
+            var removeBtn = ChemUIWidgets.CreateButton(row.transform, "×", 28, new Vector2(48f, 48f),
+                new Color(0.42f, 0.16f, 0.16f), () => RemoveAt(idx));
+            removeBtn.RT.anchoredPosition = new Vector2(252f, 0f);
+        }
+
+        contentRt.sizeDelta = new Vector2(0f, Mathf.Max(0f, ContentHeight()));
+        ClampScroll();
+        contentRt.anchoredPosition = new Vector2(0f, scrollY);
+        if (countText != null)
+        {
+            countText.text = molecules.Count > 0
+                ? $"已上台 {molecules.Count} 个分子（无上限）"
+                : "已上台 0 个分子（无上限）";
+        }
+        if (reactBtn != null) reactBtn.SetInteractable(molecules.Count >= 2);
+    }
+
+    float ContentHeight() => molecules.Count * RowH + Mathf.Max(0, molecules.Count - 1) * RowGap;
+
+    float MaxScroll() => Mathf.Max(0f, ContentHeight() - ViewportH);
+
+    void ClampScroll() => scrollY = Mathf.Clamp(scrollY, 0f, MaxScroll());
+
+    void Scroll(int rows)
+    {
+        scrollY += rows * (RowH + RowGap);
+        ClampScroll();
+        contentRt.anchoredPosition = new Vector2(0f, scrollY);
+    }
+
+    void ScrollToBottom()
+    {
+        scrollY = MaxScroll();
+        contentRt.anchoredPosition = new Vector2(0f, scrollY);
+    }
+
+    // ---------------- 手柄拖动滚动 ----------------
+
+    void Update()
+    {
+        if (viewportRt == null) return;
+
+        if (!listDragging)
+        {
+            foreach (var p in UIRayPointer.All)
+            {
+                if (p == null || !p.IsPressed) continue;
+                var ray = new Ray(p.transform.position, p.transform.forward);
+                if (RayToCanvasLocal(ray, out var local) && InsideViewport(local))
+                {
+                    listDragging = true;
+                    dragPointer = p;
+                    dragStartPos = p.transform.position;
+                    dragStartScroll = scrollY;
+                    break;
+                }
+            }
+        }
+        else if (dragPointer == null || !dragPointer.IsPressed)
+        {
+            listDragging = false;
+            dragPointer = null;
+        }
+        else
+        {
+            // 手柄竖直位移 → 列表滚动（手向上抬 = 内容上移看后面的行）
+            float dyWorld = dragPointer.transform.position.y - dragStartPos.y;
+            float dyCanvas = dyWorld / (WidthMeters / CanvasW);
+            scrollY = dragStartScroll + dyCanvas;
+            ClampScroll();
+            contentRt.anchoredPosition = new Vector2(0f, scrollY);
+        }
+    }
+
+    bool InsideViewport(Vector2 local) =>
+        Mathf.Abs(local.x - viewportRt.anchoredPosition.x) < viewportRt.sizeDelta.x * 0.5f
+        && Mathf.Abs(local.y - viewportRt.anchoredPosition.y) < viewportRt.sizeDelta.y * 0.5f;
+
+    /// <summary>射线 → 画布局部坐标（画布平面求交）</summary>
+    bool RayToCanvasLocal(Ray ray, out Vector2 local)
+    {
+        local = default;
+        if (canvasRt == null) return false;
+        var plane = new Plane(-canvasRt.forward, canvasRt.position);
+        if (!plane.Raycast(ray, out float d) || d < 0f) return false;
+        var p = canvasRt.InverseTransformPoint(ray.origin + ray.direction * d);
+        local = new Vector2(p.x, p.y);
+        return true;
     }
 
     void LateUpdate()

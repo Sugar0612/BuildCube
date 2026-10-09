@@ -39,8 +39,8 @@ public class HoloTray : MonoBehaviour
     [Tooltip("手部推开的最大位移（米）")]
     public float handPush = 0.05f;
 
-    /// <summary>总槽位：8 反应物（MoleculeTray.MaxSlots）+ 4 产物</summary>
-    public const int TotalSlots = MoleculeTray.MaxSlots + 4;
+    /// <summary>总槽位（与方程式舞台一致：8 反应物 + 4 产物；列表本身无上限）</summary>
+    public const int TotalSlots = EquationBench.TotalSlots; // 3D 舞台槽位：8 反应物 + 4 产物
 
     /// <summary>单个全息分子：粒子记录 + 独立动画状态</summary>
     class Holo
