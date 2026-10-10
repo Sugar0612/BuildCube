@@ -81,9 +81,9 @@ public class Molecule
     /// <summary>
     /// 结构几何是否有效（非退化）。GLM 估算可能返回所有原子挤在同一点的坐标，
     /// 渲染后会缩成一团几乎不可见的小点却照样报"构建完成"——这类数据必须在
-    /// 入缓存/渲染前拦下。
+    /// 入缓存/渲染前拦下。例外：单原子分子（稀有气体 He/Ne/Ar 等）展开度必然为 0，合法。
     /// </summary>
-    public bool HasValidGeometry() => GeometryExtent() >= 0.05f;
+    public bool HasValidGeometry() => atoms.Count == 1 || GeometryExtent() >= 0.05f;
 
     /// <summary>元素统计（如 "C 2 H 6 O 1"），调试用</summary>
     public string Composition()

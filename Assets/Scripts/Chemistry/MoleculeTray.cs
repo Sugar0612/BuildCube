@@ -3,11 +3,12 @@ using UnityEngine;
 using UnityEngine.UI;
 
 /// <summary>
-/// 分子列表面板（跟随用户右手斜前方固定）：无限长度的可滚动列表——
-/// 分子数量不设上限，一直添加一直追加；列表区支持手柄按住拖动滚动与 ▲/▼ 按钮翻动，
-/// 新分子上台自动滚到底部。按钮组：＋添加分子 / ⌨键盘输入 / ⚗开始反应 / 清空。
-/// 3D 方程式舞台最多呈现前 EquationBench.ReactantSlots 个反应物（相框排布上限），
-/// 列表与舞台数据同源；反应分析把全部反应物交给 GLM。
+/// 分子列表面板（固定在智能球右侧）：无限长度的可滚动列表——
+/// 滚动由 UGUI ScrollRect 驱动（惯性滑动 + 边缘回弹），手柄按住列表上下拖动时
+/// 把手部速度喂给 ScrollRect.velocity，▲/▼ 按钮甩出速度脉冲；新分子上台自动滚到底部。
+/// 按钮组：＋添加分子 / ⌨键盘输入 / ⚗开始反应 / 清空。
+/// 3D 方程式舞台最多呈现前 EquationBench.ReactantSlots 个反应物，列表与舞台数据同源；
+/// 反应分析把全部反应物交给 GLM。
 /// </summary>
 public class MoleculeTray : MonoBehaviour
 {
@@ -38,28 +39,29 @@ public class MoleculeTray : MonoBehaviour
 
     RectTransform canvasRt;
     RectTransform viewportRt, contentRt;
+    ScrollRect scroll;
     Text countText, hintText, resultText;
     ChemButton reactBtn;
     bool posSnapped;
 
-    // 滚动状态
-    float scrollY;
+    // 手柄拖动状态（速度驱动 ScrollRect）
     bool listDragging;
-    Vector3 dragStartPos;
-    float dragStartScroll;
     UIRayPointer dragPointer;
+    float lastDragY;     // 上一帧射线在画布局部的 Y（画布单位）
+    float lastDragT;
 
     const float CanvasW = 680f, CanvasH = 940f;
     const float WidthMeters = 0.6f;
     const float RowH = 62f, RowGap = 6f;     // 行高与行距（画布单位）
     const float ViewportH = 400f;            // 列表可视高度
+    const float FlingVelocity = 900f;        // ▲/▼ 按钮的速度脉冲（画布单位/秒）
 
     public int Count => molecules.Count;
 
     /// <summary>当前全部分子（按加入顺序）</summary>
     public List<Molecule> Molecules() => new List<Molecule>(molecules);
 
-    /// <summary>按顺序返回分子数组（空位概念已取消；3D 舞台自行截取前 N 个）</summary>
+    /// <summary>按顺序返回分子数组（3D 舞台自行截取前 N 个）</summary>
     public Molecule[] MoleculesBySlot() => molecules.ToArray();
 
     /// <summary>全部反应物转为候选列表（GLM 反应分析请求用）</summary>
@@ -95,7 +97,6 @@ public class MoleculeTray : MonoBehaviour
         bool had = molecules.Count > 0;
         molecules.Clear();
         if (resultText != null) resultText.text = "";
-        scrollY = 0f;
         RebuildRows();
         if (had) TrayChanged?.Invoke();
     }
@@ -149,8 +150,8 @@ public class MoleculeTray : MonoBehaviour
         countText.rectTransform.anchoredPosition = new Vector2(0f, 394f);
         countText.rectTransform.sizeDelta = new Vector2(600f, 30f);
 
-        // ---- 滚动列表区：视口（RectMask2D 裁剪超出部分）+ 内容（动态行）----
-        var vpGo = new GameObject("ListViewport", typeof(RectTransform), typeof(RectMask2D), typeof(Image));
+        // ---- 滚动列表：视口（Image+Mask 裁剪）+ ScrollRect + 内容（动态行）----
+        var vpGo = new GameObject("ListViewport", typeof(RectTransform), typeof(Image), typeof(Mask), typeof(ScrollRect));
         vpGo.transform.SetParent(root, false);
         viewportRt = vpGo.GetComponent<RectTransform>();
         viewportRt.sizeDelta = new Vector2(590f, ViewportH);
@@ -158,6 +159,14 @@ public class MoleculeTray : MonoBehaviour
         var vpBg = vpGo.GetComponent<Image>();
         vpBg.color = new Color(0.03f, 0.06f, 0.1f, 0.55f);
         vpBg.raycastTarget = false;
+
+        scroll = vpGo.GetComponent<ScrollRect>();
+        scroll.horizontal = false;
+        scroll.vertical = true;
+        scroll.movementType = ScrollRect.MovementType.Elastic; // 越界回弹
+        scroll.elasticity = 0.08f;
+        scroll.scrollSensitivity = 30f;
+        scroll.viewport = viewportRt;
 
         var ctGo = new GameObject("ListContent", typeof(RectTransform));
         ctGo.transform.SetParent(viewportRt, false);
@@ -167,13 +176,14 @@ public class MoleculeTray : MonoBehaviour
         contentRt.pivot = new Vector2(0.5f, 1f);
         contentRt.anchoredPosition = Vector2.zero;
         contentRt.sizeDelta = new Vector2(0f, 0f);
+        scroll.content = contentRt;
 
-        // ▲ / ▼ 滚动按钮（列表右缘）
+        // ▲ / ▼ 滚动按钮（列表右缘；甩出速度脉冲，由 ScrollRect 惯性接管）
         var upBtn = ChemUIWidgets.CreateButton(root, "▲", 30, new Vector2(52f, 90f),
-            new Color(0.16f, 0.3f, 0.45f), () => Scroll(-3));
+            new Color(0.16f, 0.3f, 0.45f), () => scroll.velocity = new Vector2(0f, FlingVelocity));
         upBtn.RT.anchoredPosition = new Vector2(298f, 262f);
         var downBtn = ChemUIWidgets.CreateButton(root, "▼", 30, new Vector2(52f, 90f),
-            new Color(0.16f, 0.3f, 0.45f), () => Scroll(3));
+            new Color(0.16f, 0.3f, 0.45f), () => scroll.velocity = new Vector2(0f, -FlingVelocity));
         downBtn.RT.anchoredPosition = new Vector2(298f, 82f);
 
         // 按钮组 2×2：添加/键盘 + 反应/清空
@@ -218,7 +228,6 @@ public class MoleculeTray : MonoBehaviour
 
     void RebuildRows()
     {
-        // 清旧行（连同射线按钮注册）
         for (int i = contentRt.childCount - 1; i >= 0; i--)
         {
             var child = contentRt.GetChild(i);
@@ -249,42 +258,27 @@ public class MoleculeTray : MonoBehaviour
             removeBtn.RT.anchoredPosition = new Vector2(252f, 0f);
         }
 
-        contentRt.sizeDelta = new Vector2(0f, Mathf.Max(0f, ContentHeight()));
-        ClampScroll();
-        contentRt.anchoredPosition = new Vector2(0f, scrollY);
+        contentRt.sizeDelta = new Vector2(0f, ContentHeight());
         if (countText != null)
-        {
-            countText.text = molecules.Count > 0
-                ? $"已上台 {molecules.Count} 个分子（无上限）"
-                : "已上台 0 个分子（无上限）";
-        }
+            countText.text = $"已上台 {molecules.Count} 个分子（无上限）";
         if (reactBtn != null) reactBtn.SetInteractable(molecules.Count >= 2);
     }
 
     float ContentHeight() => molecules.Count * RowH + Mathf.Max(0, molecules.Count - 1) * RowGap;
 
-    float MaxScroll() => Mathf.Max(0f, ContentHeight() - ViewportH);
-
-    void ClampScroll() => scrollY = Mathf.Clamp(scrollY, 0f, MaxScroll());
-
-    void Scroll(int rows)
-    {
-        scrollY += rows * (RowH + RowGap);
-        ClampScroll();
-        contentRt.anchoredPosition = new Vector2(0f, scrollY);
-    }
-
+    /// <summary>滚到底部（新分子上台时）。ForceUpdateCanvases 确保布局先刷新再定位。</summary>
     void ScrollToBottom()
     {
-        scrollY = MaxScroll();
-        contentRt.anchoredPosition = new Vector2(0f, scrollY);
+        if (scroll == null) return;
+        Canvas.ForceUpdateCanvases();
+        scroll.verticalNormalizedPosition = 0f; // 0=底部（内容顶对齐坐标系）
     }
 
-    // ---------------- 手柄拖动滚动 ----------------
+    // ---------------- 手柄拖动 → ScrollRect 速度 ----------------
 
     void Update()
     {
-        if (viewportRt == null) return;
+        if (viewportRt == null || scroll == null) return;
 
         if (!listDragging)
         {
@@ -296,25 +290,29 @@ public class MoleculeTray : MonoBehaviour
                 {
                     listDragging = true;
                     dragPointer = p;
-                    dragStartPos = p.transform.position;
-                    dragStartScroll = scrollY;
+                    lastDragY = local.y;
+                    lastDragT = Time.unscaledTime;
+                    scroll.velocity = Vector2.zero; // 接管：先停掉惯性
                     break;
                 }
             }
         }
         else if (dragPointer == null || !dragPointer.IsPressed)
         {
+            // 松手：保留当前速度，ScrollRect 惯性接管
             listDragging = false;
             dragPointer = null;
         }
-        else
+        else if (RayToCanvasLocal(new Ray(dragPointer.transform.position, dragPointer.transform.forward),
+                                  out var cur))
         {
-            // 手柄竖直位移 → 列表滚动（手向上抬 = 内容上移看后面的行）
-            float dyWorld = dragPointer.transform.position.y - dragStartPos.y;
-            float dyCanvas = dyWorld / (WidthMeters / CanvasW);
-            scrollY = dragStartScroll + dyCanvas;
-            ClampScroll();
-            contentRt.anchoredPosition = new Vector2(0f, scrollY);
+            // 手部移动速度（画布单位/秒）→ 滚动速度：手上抬（Y 增大）= 内容上移看后面的行
+            float now = Time.unscaledTime;
+            float dt = Mathf.Max(0.008f, now - lastDragT);
+            float vy = (cur.y - lastDragY) / dt;
+            scroll.velocity = new Vector2(0f, vy);
+            lastDragY = cur.y;
+            lastDragT = now;
         }
     }
 
